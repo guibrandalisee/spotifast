@@ -264,6 +264,8 @@ pub struct Settings {
     pub accent_from_art: bool,
     /// A spectrum or waveform of the playing song behind the player bar.
     pub player_bar_vis: PlayerBarVis,
+    /// Allow clicks on empty player-bar space to cycle the visualizer.
+    pub player_bar_vis_click: bool,
     /// Last local volume, 0..=65535.
     pub volume: u16,
     /// Whether the library sidebar is visible.
@@ -432,6 +434,7 @@ impl Default for Settings {
             home: HomeSettings::default(),
             accent_from_art: true,
             player_bar_vis: PlayerBarVis::Off,
+            player_bar_vis_click: true,
             volume: (u16::MAX as u32 * 70 / 100) as u16,
             sidebar_visible: true,
             art_expanded: false,
@@ -1189,6 +1192,14 @@ mod tests {
         use super::PlayerBarVis;
         let settings: Settings = serde_json::from_str("{}").unwrap();
         assert_eq!(settings.player_bar_vis, PlayerBarVis::Off);
+        assert!(settings.player_bar_vis_click);
+        let disabled = Settings {
+            player_bar_vis_click: false,
+            ..Settings::default()
+        };
+        let restored: Settings =
+            serde_json::from_str(&serde_json::to_string(&disabled).unwrap()).unwrap();
+        assert!(!restored.player_bar_vis_click);
         for mode in [PlayerBarVis::Spectrum, PlayerBarVis::Waveform] {
             let settings = Settings {
                 player_bar_vis: mode,

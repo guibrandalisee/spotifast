@@ -32,6 +32,10 @@ playlist songs for read-only browsing when it starts without a connection. It
 keeps trying to reconnect and refreshes the library when Spotify responds.
 Offline audio playback is not available.
 
+Spotifast respects Spotify's full rate-limit wait and resumes with one request
+before releasing waiting work. A [personal Spotify app](docs/_guide/make-it-even-faster.md)
+can reduce dependence on the shared quota for supported requests.
+
 Shuffle, Repeat, playlist and library text filters, the open queue or lyrics
 panel, and Back/Forward navigation are remembered between launches.
 The last song's details and position are also saved so it appears paused in
@@ -152,3 +156,5 @@ Spotifast is an independent project and is not affiliated with Spotify.
 Spotify is a trademark of Spotify AB.
 
 Licensed under the [MIT License](LICENSE).
+
+The player bar visualizer can be selected in Settings → Appearance. Disable **Change visualizer by clicking the player bar** there to prevent accidental changes from clicks on the controls bar.

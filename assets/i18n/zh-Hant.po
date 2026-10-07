@@ -3085,3 +3085,9 @@ msgstr "在 ARM 版 Windows 上，Spotifast 用來繪製介面的 OpenGL 由 Mic
 
 #~ msgid "Reduce lyrics motion"
 #~ msgstr "減少歌詞動畫"
+
+msgid "Change visualizer by clicking the player bar"
+msgstr "點擊播放列變更視覺效果"
+
+msgid "Allow clicks on empty player bar space to change the animation."
+msgstr "允許點擊播放列空白處變更動畫。"

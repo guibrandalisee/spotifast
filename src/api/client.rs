@@ -5,7 +5,7 @@
 //! handles capability differences before dispatch.
 
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -22,7 +22,17 @@ use crate::http::Http;
 const BASE_URL: &str = "https://api.spotify.com/v1";
 const MAX_IN_FLIGHT: usize = 6;
 const RATE_LIMIT_RETRIES: u32 = 3;
-const MAX_RETRY_AFTER: Duration = Duration::from_secs(30);
+
+fn rate_limit_wait(headers: &reqwest::header::HeaderMap, attempt: u32) -> Duration {
+    headers
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(Duration::from_secs)
+        // Missing or malformed headers must not cause a tight retry loop,
+        // including queue appends which can retry beyond the usual budget.
+        .unwrap_or_else(|| Duration::from_secs(1_u64 << attempt.saturating_sub(1).min(5)))
+}
 
 #[derive(Clone, Debug, Error)]
 pub enum ApiError {
@@ -347,6 +357,8 @@ pub struct ApiClient {
     limiter: Semaphore,
     queue_writes: tokio::sync::Mutex<()>,
     cooldown_until: tokio::sync::Mutex<Instant>,
+    recovering: AtomicBool,
+    recovery_probe: tokio::sync::Mutex<()>,
     search_limit: u32,
     artist_albums_limit: u32,
     source: ApiSource,
@@ -369,6 +381,8 @@ impl ApiClient {
             limiter: Semaphore::new(MAX_IN_FLIGHT),
             queue_writes: tokio::sync::Mutex::new(()),
             cooldown_until: tokio::sync::Mutex::new(Instant::now()),
+            recovering: AtomicBool::new(false),
+            recovery_probe: tokio::sync::Mutex::new(()),
             search_limit,
             artist_albums_limit,
             source,
@@ -415,6 +429,7 @@ impl ApiClient {
     async fn extend_cooldown(&self, wait: Duration) {
         let mut until = self.cooldown_until.lock().await;
         *until = (*until).max(Instant::now() + wait);
+        self.recovering.store(true, Ordering::SeqCst);
     }
 
     // ---- transport -------------------------------------------------------
@@ -466,6 +481,21 @@ impl ApiClient {
                 .await
                 .map_err(|_| ApiError::NotSignedIn)?;
             let token = provider.access_token().await?;
+            // A request can spend time waiting for a permit or a token refresh.
+            // Another request may have installed a cooldown in the meantime.
+            // After a 429, let one request test the quota before releasing
+            // the whole waiting burst. Cancellation releases this lock too.
+            let mut probe = None;
+            loop {
+                self.wait_for_cooldown().await;
+                if probe.is_some() || !self.recovering.load(Ordering::SeqCst) {
+                    break;
+                }
+                probe = Some(self.recovery_probe.lock().await);
+            }
+            if !self.recovering.load(Ordering::SeqCst) {
+                probe = None;
+            }
             let mut request = self
                 .http
                 .client()
@@ -491,24 +521,16 @@ impl ApiClient {
                 continue;
             }
             if status == StatusCode::TOO_MANY_REQUESTS {
-                let wait = response
-                    .headers()
-                    .get(reqwest::header::RETRY_AFTER)
-                    .and_then(|value| value.to_str().ok())
-                    .and_then(|value| value.parse::<u64>().ok())
-                    .map_or(Duration::from_secs(1), Duration::from_secs);
+                let wait = rate_limit_wait(response.headers(), attempt);
+                // Publish the full deadline before reading the response body
+                // or releasing the permit to another waiting request.
+                self.extend_cooldown(wait).await;
                 let text = response.text().await.unwrap_or_default();
                 if is_quota_exhausted(&text) {
                     return Err(ApiError::QuotaExhausted);
                 }
-                // A rejected queue append is safe to retry. Keep its place
-                // in the write lock and honor the full server-requested wait.
-                // Other requests retain their existing bounded retry policy.
-                let wait = if queue_write || !retry_rate_limits {
-                    wait
-                } else {
-                    wait.min(MAX_RETRY_AFTER)
-                };
+                // Bound the number of retries, never Spotify's requested wait.
+                // Queue appends retain their place in the write lock.
                 log::warn!("Spotify rate limit source={} wait={wait:?}", self.source);
                 log::info!(
                     "Spotify cooldown source={} duration_ms={}",
@@ -516,7 +538,6 @@ impl ApiClient {
                     wait.as_millis()
                 );
                 drop(permit);
-                self.extend_cooldown(wait).await;
                 if !retry_rate_limits || (!queue_write && attempt > RATE_LIMIT_RETRIES) {
                     return Err(ApiError::RateLimited);
                 }
@@ -536,6 +557,14 @@ impl ApiClient {
                 started.elapsed().as_millis()
             );
             if status.is_success() {
+                if probe.is_some() {
+                    let until = self.cooldown_until.lock().await;
+                    // A concurrent, older request may have received another
+                    // 429 while this probe was in flight. Keep its deadline.
+                    if *until <= Instant::now() {
+                        self.recovering.store(false, Ordering::SeqCst);
+                    }
+                }
                 return Ok(text);
             }
             let message = serde_json::from_str::<ApiErrorBody>(&text)
@@ -1210,6 +1239,206 @@ impl ApiClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn local_client(address: std::net::SocketAddr) -> Arc<ApiClient> {
+        let http = reqwest::Client::builder().no_proxy().build().unwrap();
+        let mut client = ApiClient::new(
+            http.clone(),
+            Arc::new(NetActivity::default()),
+            20,
+            50,
+            ApiSource::Shared,
+        );
+        client.base_url = Some(format!("http://{address}"));
+        client.set_token_provider(Some(TokenProvider::Web(WebTokens::new(
+            http,
+            crate::auth::StoredToken {
+                access_token: "test-only".into(),
+                expires_at: u64::MAX,
+                ..Default::default()
+            },
+            crate::credentials::Store::in_memory(crate::paths::AppDirs {
+                config: std::env::temp_dir().join("unused-rate-limit-token/config"),
+                state: std::env::temp_dir().join("unused-rate-limit-token/state"),
+                cache: std::env::temp_dir().join("unused-rate-limit-token/cache"),
+            })
+            .lease(crate::credentials::Slot::Shared),
+            ApiSource::Shared,
+            Arc::new(|_| {}),
+        ))));
+        Arc::new(client)
+    }
+
+    async fn read_test_request(socket: &mut tokio::net::TcpStream) {
+        use tokio::io::AsyncReadExt;
+        let mut request = Vec::new();
+        while !request.ends_with(b"\r\n\r\n") {
+            request.push(socket.read_u8().await.unwrap());
+            assert!(request.len() < 8192);
+        }
+    }
+
+    async fn reply_test_user(socket: &mut tokio::net::TcpStream) {
+        use tokio::io::AsyncWriteExt;
+        socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 14\r\nConnection: close\r\n\r\n{\"id\":\"alice\"}").await.unwrap();
+    }
+
+    #[test]
+    fn rate_limit_wait_keeps_server_deadlines_and_backs_off_without_them() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        for (attempt, seconds) in [(1, 1), (2, 2), (3, 4), (6, 32), (u32::MAX, 32)] {
+            assert_eq!(
+                rate_limit_wait(&headers, attempt),
+                Duration::from_secs(seconds)
+            );
+        }
+        headers.insert(reqwest::header::RETRY_AFTER, "invalid".parse().unwrap());
+        assert_eq!(rate_limit_wait(&headers, 3), Duration::from_secs(4));
+        for seconds in [0, 1, 120, 3600] {
+            headers.insert(
+                reqwest::header::RETRY_AFTER,
+                seconds.to_string().parse().unwrap(),
+            );
+            assert_eq!(rate_limit_wait(&headers, 3), Duration::from_secs(seconds));
+        }
+    }
+
+    #[tokio::test]
+    async fn ordinary_reads_publish_full_cooldown_before_reading_the_body() {
+        use tokio::io::AsyncWriteExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = local_client(listener.local_addr().unwrap());
+        let request = tokio::spawn({
+            let client = Arc::clone(&client);
+            async move { client.me().await }
+        });
+        let (mut socket, _) = listener.accept().await.unwrap();
+        read_test_request(&mut socket).await;
+        // Leave the body outstanding to verify the deadline is published as
+        // soon as the headers arrive, rather than after a slow body download.
+        socket.write_all(b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 120\r\nContent-Length: 1\r\nConnection: close\r\n\r\n").await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !client.recovering.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(*client.cooldown_until.lock().await >= Instant::now() + Duration::from_secs(119));
+        socket.write_all(b" ").await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                .await
+                .is_err()
+        );
+        request.abort();
+        assert!(request.await.unwrap_err().is_cancelled());
+        assert_eq!(client.limiter.available_permits(), MAX_IN_FLIGHT);
+        assert_eq!(client.activity.in_flight.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn requests_waiting_for_a_permit_observe_a_new_cooldown() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = local_client(listener.local_addr().unwrap());
+        let permits = client
+            .limiter
+            .acquire_many(MAX_IN_FLIGHT as u32)
+            .await
+            .unwrap();
+        let request = tokio::spawn({
+            let client = Arc::clone(&client);
+            async move { client.me().await }
+        });
+        // Poll the request into its semaphore wait before installing a 429.
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while client.activity.in_flight.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        client.extend_cooldown(Duration::from_secs(1)).await;
+        drop(permits);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                .await
+                .is_err()
+        );
+        let (mut socket, _) = tokio::time::timeout(Duration::from_secs(2), listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        read_test_request(&mut socket).await;
+        reply_test_user(&mut socket).await;
+        assert_eq!(request.await.unwrap().unwrap().id, "alice");
+    }
+
+    #[tokio::test]
+    async fn cancelled_recovery_probe_releases_the_next_waiting_request() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = local_client(listener.local_addr().unwrap());
+        client.extend_cooldown(Duration::ZERO).await;
+        let first = tokio::spawn({
+            let client = Arc::clone(&client);
+            async move { client.me().await }
+        });
+        let (mut socket, _) = listener.accept().await.unwrap();
+        read_test_request(&mut socket).await;
+        let second = tokio::spawn({
+            let client = Arc::clone(&client);
+            async move { client.me().await }
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                .await
+                .is_err()
+        );
+        first.abort();
+        assert!(first.await.unwrap_err().is_cancelled());
+        let (mut socket, _) = tokio::time::timeout(Duration::from_secs(2), listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        read_test_request(&mut socket).await;
+        reply_test_user(&mut socket).await;
+        assert_eq!(second.await.unwrap().unwrap().id, "alice");
+        assert_eq!(client.limiter.available_permits(), MAX_IN_FLIGHT);
+        assert!(!client.recovering.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn cooldown_recovery_sends_one_probe_before_releasing_waiters() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = local_client(listener.local_addr().unwrap());
+        client.extend_cooldown(Duration::ZERO).await;
+        let mut requests = tokio::task::JoinSet::new();
+        for _ in 0..MAX_IN_FLIGHT {
+            let client = Arc::clone(&client);
+            requests.spawn(async move { client.me().await });
+        }
+        let (mut socket, _) = listener.accept().await.unwrap();
+        read_test_request(&mut socket).await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                .await
+                .is_err()
+        );
+        reply_test_user(&mut socket).await;
+        for _ in 1..MAX_IN_FLIGHT {
+            let (mut socket, _) = tokio::time::timeout(Duration::from_secs(2), listener.accept())
+                .await
+                .unwrap()
+                .unwrap();
+            read_test_request(&mut socket).await;
+            reply_test_user(&mut socket).await;
+        }
+        while let Some(result) = requests.join_next().await {
+            assert_eq!(result.unwrap().unwrap().id, "alice");
+        }
+        assert!(!client.recovering.load(Ordering::SeqCst));
+        assert_eq!(client.limiter.available_permits(), MAX_IN_FLIGHT);
+    }
 
     #[tokio::test]
     async fn verification_sends_one_request_per_rate_limit_cooldown() {

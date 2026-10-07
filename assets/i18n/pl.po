@@ -3204,3 +3204,9 @@ msgstr "W systemie Windows na ARM OpenGL, którego Spotifast używa do rysowania
 
 #~ msgid "Reduce lyrics motion"
 #~ msgstr "Ogranicz animacje tekstu"
+
+msgid "Change visualizer by clicking the player bar"
+msgstr "Zmieniaj wizualizację kliknięciem paska odtwarzania"
+
+msgid "Allow clicks on empty player bar space to change the animation."
+msgstr "Pozwól zmieniać animację kliknięciem pustego miejsca na pasku odtwarzania."

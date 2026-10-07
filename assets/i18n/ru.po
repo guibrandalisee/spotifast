@@ -3199,3 +3199,9 @@ msgstr "В Windows на ARM OpenGL, с помощью которого рису�
 
 #~ msgid "Reduce lyrics motion"
 #~ msgstr "Уменьшить анимацию текста"
+
+msgid "Change visualizer by clicking the player bar"
+msgstr "Менять визуализацию щелчком по панели воспроизведения"
+
+msgid "Allow clicks on empty player bar space to change the animation."
+msgstr "Разрешить щелчкам по пустому месту панели воспроизведения менять анимацию."

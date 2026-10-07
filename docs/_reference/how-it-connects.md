@@ -195,6 +195,14 @@ rows are placeholders until their page arrives; scrolling never starts playback.
 Each Web API session has separate concurrency and rate limits. A `Retry-After`
 response pauses only that session. Sign-in verification makes one `/me` request
 per cooldown instead of repeating the HTTP request within the same wait.
+Every request respects the full `Retry-After` deadline, including requests
+already waiting for a concurrency slot. The pause starts when the response
+headers arrive. After the pause, one request checks whether Spotify is ready
+before the other waiting requests resume. A cancelled check releases its slot.
+When the header is missing or invalid, repeated rate limits use progressively
+longer waits, up to 32 seconds. The normal retry count remains bounded; queue
+appends keep their order while waiting. Playback-state reads never overlap,
+and a scheduled follow-up waits for the pending read to finish.
 Spotifast routes each request once and
 does not retry it through the other app. A playlist read the librespot session
 refuses outright, because the playlist is gone or private, is shown as such. A

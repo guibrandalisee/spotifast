@@ -2275,6 +2275,12 @@ impl App {
 
     fn reset_data(&mut self) {
         self.remember_playlist_filters();
+        // Sign-out cancels backend reads without returning a response. Allow
+        // the new session to poll, and reject any old completion by sequence.
+        self.remote_poll_pending = false;
+        self.remote_poll_seq += 1;
+        self.remote_recheck_at = None;
+        self.remote_polled_at = Instant::now() - REMOTE_POLL_IDLE;
         self.local_transfer_sequence = None;
         self.queue_start_pending = None;
         self.pending_album_queues.clear();
@@ -2957,14 +2963,15 @@ impl App {
                 Target::Local if self.local.is_active() => REMOTE_POLL_IDLE,
                 _ => REMOTE_POLL_ACTIVE,
             };
-            if !self.remote_poll_pending && self.remote_polled_at.elapsed() >= interval {
-                self.poll_remote(false);
-            }
             if let Some(due) = self.remote_recheck_at
                 && Instant::now() >= due
+                && !self.remote_poll_pending
             {
                 self.remote_recheck_at = None;
                 self.poll_remote(true);
+            }
+            if !self.remote_poll_pending && self.remote_polled_at.elapsed() >= interval {
+                self.poll_remote(false);
             }
             if self.show_devices
                 && !self.devices_loading
@@ -4413,7 +4420,7 @@ impl App {
     }
 
     fn poll_remote(&mut self, _immediate: bool) {
-        if !self.is_connected() {
+        if !self.is_connected() || self.remote_poll_pending {
             return;
         }
         self.remote_poll_pending = true;
@@ -9676,8 +9683,10 @@ impl App {
             // close-to-tray setting decides what follows.
             Action::CloseWindow => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             Action::CyclePlayerBarVis => {
-                self.settings.player_bar_vis = self.settings.player_bar_vis.next();
-                self.settings_dirty = true;
+                if self.settings.player_bar_vis_click {
+                    self.settings.player_bar_vis = self.settings.player_bar_vis.next();
+                    self.settings_dirty = true;
+                }
             }
             Action::CycleVisualiser => {
                 self.settings.vis = self.settings.vis.next();
@@ -13221,6 +13230,71 @@ mod tests {
             "the real engine track wins without waiting for a timeout"
         );
         assert!(app.intent_track.is_none());
+    }
+
+    #[test]
+    fn resetting_data_releases_a_cancelled_playback_poll() {
+        let mut app = headless_app();
+        app.auth = AuthStatus::Connected {
+            username: "listener".into(),
+        };
+        app.remote_poll_pending = true;
+        app.remote_poll_seq = 7;
+        app.remote_recheck_at = Some(Instant::now());
+        app.reset_data();
+        assert!(!app.remote_poll_pending);
+        assert!(app.remote_recheck_at.is_none());
+        app.poll_remote(true);
+        assert!(app.remote_poll_pending);
+        let new_sequence = app.remote_poll_seq;
+        app.handle_api(ApiResponse::PlaybackState {
+            seq: 7,
+            result: Ok(None),
+        });
+        assert!(app.remote_poll_pending);
+        assert_eq!(app.remote_poll_seq, new_sequence);
+        app.backend.shutdown();
+    }
+
+    #[test]
+    fn pending_playback_poll_keeps_its_follow_up_without_duplicate_requests() {
+        let mut app = headless_app();
+        app.auth = AuthStatus::Connected {
+            username: "listener".into(),
+        };
+        app.settings.check_for_updates = false;
+        app.remote_poll_pending = true;
+        app.remote_poll_seq = 7;
+        app.remote_polled_at = Instant::now() - REMOTE_POLL_IDLE;
+        let due = Instant::now();
+        app.remote_recheck_at = Some(due);
+
+        app.poll_remote(true);
+        assert_eq!(app.remote_poll_seq, 7);
+        app.tick(&egui::Context::default());
+        assert_eq!(app.remote_poll_seq, 7);
+        assert_eq!(app.remote_recheck_at, Some(due));
+
+        app.handle_api(ApiResponse::PlaybackState {
+            seq: 7,
+            result: Ok(None),
+        });
+        assert!(!app.remote_poll_pending);
+        app.tick(&egui::Context::default());
+        assert!(app.remote_poll_pending);
+        assert_eq!(app.remote_poll_seq, 8);
+        // One fresh read serves both the scheduled follow-up and the periodic
+        // poll instead of sending two requests for the same state.
+        assert!(app.remote_recheck_at.is_none());
+        app.handle_api(ApiResponse::PlaybackState {
+            seq: 8,
+            result: Ok(None),
+        });
+        app.tick(&egui::Context::default());
+        assert_eq!(app.remote_poll_seq, 8);
+        assert!(!app.remote_poll_pending);
+        assert!(app.remote_recheck_at.is_none());
+        app.backend.shutdown();
     }
 
     /// Remote state is polled rather than pushed. Ignore a poll already in
