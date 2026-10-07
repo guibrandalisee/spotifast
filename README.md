@@ -27,6 +27,16 @@ Spotifast is a Spotify client written in Rust with
 **Playback needs Spotify Premium.** Free accounts can browse and search, but
 cannot play music through Spotifast.
 
+After a successful sign-in, Spotifast keeps the playlist library and visited
+playlist songs for read-only browsing when it starts without a connection. It
+keeps trying to reconnect and refreshes the library when Spotify responds.
+Offline audio playback is not available.
+
+Shuffle, Repeat, playlist and library text filters, the open queue or lyrics
+panel, and Back/Forward navigation are remembered between launches.
+The last song's details and position are also saved so it appears paused in
+the player bar immediately on reopening, before the network responds.
+
 ![Spotifast Home with the playlist library, recommendations, queue, and player visible](docs/screenshot.png)
 
 <details>

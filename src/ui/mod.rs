@@ -38,7 +38,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     for path in winamp::dropped_skins(ctx) {
         app.actions.push(Action::InstallSkin(path));
     }
-    let signed_in = app.is_connected() && app.user.is_some();
+    let signed_in = app.user.is_some() && (app.is_connected() || app.browsing_saved_library());
     let connecting = matches!(app.auth, AuthStatus::Connecting | AuthStatus::Starting)
         || (app.is_connected() && app.user.is_none());
     if !signed_in {

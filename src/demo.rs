@@ -812,6 +812,22 @@ pub fn apply_flags(app: &mut App, page: Option<&str>, show: Option<&str>) {
                 app.auth = AuthStatus::Connecting;
                 app.user = None;
             }
+            "offline-library" => {
+                let Some(user) = app.user.clone() else {
+                    continue;
+                };
+                let Some(playlists) = app.library.playlists.get().cloned() else {
+                    continue;
+                };
+                app.offline_library = Some(crate::offline_library::Cache::new(user, playlists));
+                app.auth = AuthStatus::Connecting;
+                app.local = crate::player::LocalState::default();
+                app.local_playback = crate::backend::LocalPlayback::Unavailable;
+                app.local_ready = false;
+                app.local_device_id = None;
+                app.remote = None;
+                app.open(Page::Playlist("pl1".into()));
+            }
             "recents" => {
                 app.show_queue_panel = true;
                 app.queue_tab = QueueTab::Recents;
@@ -1257,6 +1273,43 @@ mod tests {
         // These frames never advance the clock or take pictures.
         app.reveal_theme_changes = false;
         (ctx, app)
+    }
+
+    #[cfg(feature = "demo")]
+    #[test]
+    fn saved_library_renders_in_the_existing_sidebar_and_playlist_page() {
+        let (ctx, mut app) = accessible_app("saved-library-normal-ui");
+        apply_flags(&mut app, None, Some("offline-library"));
+        assert!(app.browsing_saved_library());
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1200.0, 800.0),
+                )),
+                ..Default::default()
+            },
+            |ui| app.frame_ui(ui),
+        );
+        let panel = |id| {
+            egui::containers::panel::PanelState::load(&ctx, egui::Id::new(id))
+                .expect("the normal app panel was drawn")
+                .outer_rect
+        };
+        assert!(panel("sidebar").width() > 200.0);
+        assert!(panel("player-bar").height() > 0.0);
+        let painted: Vec<_> = output
+            .shapes
+            .iter()
+            .filter_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) => Some(text.galley.job.text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(painted.iter().any(|text| text.contains("Late night focus")));
+        assert!(painted.iter().any(|text| text.contains("Rosewood")));
+        output.textures_delta.clear();
+        app.backend.shutdown();
     }
 
     /// #576: the Library heading never runs under the header's buttons. It

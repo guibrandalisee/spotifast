@@ -734,6 +734,7 @@ mod tests {
             refresh_token: "dummy-refresh".into(),
             expires_at: u64::MAX,
             scope: "dummy-scope".into(),
+            account_id: None,
         })
     }
     fn playback() -> Grant {

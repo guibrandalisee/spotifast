@@ -561,6 +561,8 @@ impl<T> CursorList<T> {
 #[derive(Default)]
 pub struct Library {
     pub playlists: Loadable<Vec<Playlist>>,
+    /// A full replacement assembled behind the visible cached list.
+    pub playlists_refresh: Option<Vec<Playlist>>,
     pub playlists_next: Option<u32>,
     /// Which load of the playlists the pages on their way belong to. Every
     /// load from the top takes a new one, so a page asked for by an earlier
@@ -659,6 +661,8 @@ pub struct SearchState {
 #[derive(Default)]
 pub struct PlaylistPage {
     pub generation: u64,
+    /// Cached rows displayed until the live playlist request completes.
+    pub needs_live_refresh: bool,
     /// Generation that produced the rows, which may lag during refresh.
     pub items_generation: u64,
     pub playlist: Loadable<Playlist>,

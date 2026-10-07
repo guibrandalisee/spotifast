@@ -1501,6 +1501,9 @@ pub struct SessionState {
     /// What was playing when the app closed, to resume from a cold start.
     pub last_context: Option<String>,
     pub last_track: Option<String>,
+    /// Metadata needed to display the remembered song before the network responds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_track_metadata: Option<crate::api::models::Track>,
     pub last_position_ms: u32,
     /// Manually queued songs to restore with the remembered track.
     ///
@@ -1517,6 +1520,14 @@ pub struct SessionState {
     pub rootlist: Option<CachedRootlist>,
     /// Shuffle mode saved across contexts and restarts.
     pub shuffle_on: bool,
+    /// Last selected repeat mode; absent in older sessions.
+    pub repeat_mode: Option<String>,
+    /// Playlist text filters, retained when their pages leave memory.
+    pub playlist_filters: std::collections::BTreeMap<String, String>,
+    pub library_filter: String,
+    pub lyrics_open: bool,
+    pub navigation: Vec<String>,
+    pub navigation_index: usize,
     /// Each table's chosen sort, by encoded page, restored at start.
     pub sorts: Vec<(String, crate::model::TableSort)>,
     /// Last window inner size, to restore on next launch.

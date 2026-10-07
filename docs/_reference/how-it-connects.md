@@ -9,6 +9,14 @@ nav_order: 1
 Spotifast uses separate credentials for Web API access, a personal app, and
 local playback:
 
+On a later launch, restoring a saved Web API grant also permits read-only
+browsing of the last verified playlist library while network verification
+retries. This uses local cache files and sends no additional Spotify request.
+Normal Web API playlist loading resumes after verification.
+The protected Web API grant remembers its verified account ID so a refreshed
+token still opens only that account's cache. Older grants gain this field on
+their next successful online verification.
+
 1. **The shared Web API app** keeps full catalogue and playlist coverage.
 2. **Your optional personal Web API app** handles supported playback, library,
    catalog, catalogue search, playlist creation, and owned or collaborative
@@ -185,7 +193,9 @@ rows are placeholders until their page arrives; scrolling never starts playback.
 ## When Spotify pushes back
 
 Each Web API session has separate concurrency and rate limits. A `Retry-After`
-response pauses only that session. Spotifast routes each request once and
+response pauses only that session. Sign-in verification makes one `/me` request
+per cooldown instead of repeating the HTTP request within the same wait.
+Spotifast routes each request once and
 does not retry it through the other app. A playlist read the librespot session
 refuses outright, because the playlist is gone or private, is shown as such. A
 dropped connection, a read that takes longer than 30 seconds, or a page whose

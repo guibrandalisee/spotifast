@@ -134,6 +134,22 @@ impl WebTokens {
         pending.await
     }
 
+    /// Bind the protected grant to the account Spotify just verified.
+    pub async fn remember_verified_account(
+        &self,
+        account_id: &str,
+    ) -> std::result::Result<(), crate::credentials::Error> {
+        let mut token = self.token.lock().await;
+        token.account_id = Some(account_id.to_string());
+        self.remember
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let pending = self
+            .lease
+            .save(crate::credentials::Grant::Web(token.clone()));
+        drop(token);
+        pending.await
+    }
+
     /// A valid access token, refreshing first when it is close to expiry or
     /// `force` asks for a fresh one after a 401.
     async fn access_token(&self, force: bool) -> Result<String> {
@@ -158,7 +174,8 @@ impl WebTokens {
                     response,
                     Some(&refresh_token),
                 ) {
-                    Ok(updated) => {
+                    Ok(mut updated) => {
+                        updated.account_id = guard.account_id.clone();
                         if !self.lease.current() {
                             return Err(ApiError::SignInExpired {
                                 api_source: self.source,
@@ -409,7 +426,7 @@ impl ApiClient {
         query: &[(&str, String)],
         body: Option<&Value>,
     ) -> Result<String> {
-        self.send_body(method, path, query, body, None).await
+        self.send_body(method, path, query, body, None, true).await
     }
 
     async fn send_body(
@@ -419,6 +436,7 @@ impl ApiClient {
         query: &[(&str, String)],
         body: Option<&Value>,
         jpeg: Option<&str>,
+        retry_rate_limits: bool,
     ) -> Result<String> {
         let url = if path.starts_with("http") {
             path.to_string()
@@ -486,7 +504,7 @@ impl ApiClient {
                 // A rejected queue append is safe to retry. Keep its place
                 // in the write lock and honor the full server-requested wait.
                 // Other requests retain their existing bounded retry policy.
-                let wait = if queue_write {
+                let wait = if queue_write || !retry_rate_limits {
                     wait
                 } else {
                     wait.min(MAX_RETRY_AFTER)
@@ -499,7 +517,7 @@ impl ApiClient {
                 );
                 drop(permit);
                 self.extend_cooldown(wait).await;
-                if !queue_write && attempt > RATE_LIMIT_RETRIES {
+                if !retry_rate_limits || (!queue_write && attempt > RATE_LIMIT_RETRIES) {
                     return Err(ApiError::RateLimited);
                 }
                 continue;
@@ -538,7 +556,18 @@ impl ApiClient {
     }
 
     async fn get<T: DeserializeOwned>(&self, path: &str, query: &[(&str, String)]) -> Result<T> {
-        let text = self.send(Method::GET, path, query, None).await?;
+        self.get_with_rate_limit_retries(path, query, true).await
+    }
+
+    async fn get_with_rate_limit_retries<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        query: &[(&str, String)],
+        retry_rate_limits: bool,
+    ) -> Result<T> {
+        let text = self
+            .send_body(Method::GET, path, query, None, None, retry_rate_limits)
+            .await?;
         if text.trim().is_empty() {
             return serde_json::from_value(Value::Null)
                 .map_err(|error| ApiError::Decode(error.to_string()));
@@ -593,6 +622,12 @@ impl ApiClient {
 
     pub async fn me(&self) -> Result<User> {
         self.get("/me", &[]).await
+    }
+
+    /// Sign-in already retries transient failures; one request per Spotify
+    /// cooldown avoids multiplying 429s inside that outer retry loop.
+    pub async fn me_for_verification(&self) -> Result<User> {
+        self.get_with_rate_limit_retries("/me", &[], false).await
     }
 
     pub async fn devices(&self) -> Result<Vec<Device>> {
@@ -845,6 +880,7 @@ impl ApiClient {
             &[],
             None,
             Some(encoded),
+            true,
         )
         .await?;
         Ok(())
@@ -1176,6 +1212,76 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn verification_sends_one_request_per_rate_limit_cooldown() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for index in 0..2 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    request.push(socket.read_u8().await.unwrap());
+                    assert!(request.len() < 8192);
+                }
+                if index == 0 {
+                    socket
+                        .write_all(b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                        .await
+                        .unwrap();
+                } else {
+                    let body = br#"{"id":"alice"}"#;
+                    socket
+                        .write_all(
+                            format!(
+                                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                body.len()
+                            )
+                            .as_bytes(),
+                        )
+                        .await
+                        .unwrap();
+                    socket.write_all(body).await.unwrap();
+                }
+            }
+        });
+        let http = reqwest::Client::builder().no_proxy().build().unwrap();
+        let mut client = ApiClient::new(
+            http.clone(),
+            Arc::new(NetActivity::default()),
+            20,
+            50,
+            ApiSource::Shared,
+        );
+        client.base_url = Some(format!("http://{address}"));
+        client.set_token_provider(Some(TokenProvider::Web(WebTokens::new(
+            http,
+            crate::auth::StoredToken {
+                access_token: "test-only".into(),
+                expires_at: u64::MAX,
+                ..Default::default()
+            },
+            crate::credentials::Store::in_memory(crate::paths::AppDirs {
+                config: std::env::temp_dir().join("unused-verification-token/config"),
+                state: std::env::temp_dir().join("unused-verification-token/state"),
+                cache: std::env::temp_dir().join("unused-verification-token/cache"),
+            })
+            .lease(crate::credentials::Slot::Shared),
+            ApiSource::Shared,
+            Arc::new(|_| {}),
+        ))));
+        let started = Instant::now();
+        assert!(matches!(
+            client.me_for_verification().await,
+            Err(ApiError::RateLimited)
+        ));
+        assert_eq!(client.me_for_verification().await.unwrap().id, "alice");
+        assert!(started.elapsed() >= Duration::from_secs(1));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn revoked_provider_cannot_return_or_persist_its_token() {
         let root =
             std::env::temp_dir().join(format!("spotifast-revoked-provider-{}", std::process::id()));
@@ -1193,6 +1299,7 @@ mod tests {
                 refresh_token: "dummy-refresh".into(),
                 expires_at: u64::MAX,
                 scope: String::new(),
+                account_id: None,
             },
             store.lease(slot),
             ApiSource::Shared,
@@ -1201,8 +1308,11 @@ mod tests {
         // Verification can use a token in memory without persisting it yet.
         assert_eq!(tokens.access_token(false).await.unwrap(), "dummy-access");
         assert!(store.lease(slot).load().await.unwrap().grant.is_none());
-        tokens.remember().await.unwrap();
-        assert!(store.lease(slot).load().await.unwrap().grant.is_some());
+        tokens.remember_verified_account("alice").await.unwrap();
+        assert!(matches!(
+            store.lease(slot).load().await.unwrap().grant,
+            Some(crate::credentials::Grant::Web(token)) if token.account_id.as_deref() == Some("alice")
+        ));
         store.revoke_spotify().unwrap();
         store.lease(slot).delete().await.unwrap();
         assert!(matches!(

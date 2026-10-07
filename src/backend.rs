@@ -304,6 +304,7 @@ pub enum ApiRequest {
     ShufflePlay {
         device_id: Option<String>,
         play: PlayRequest,
+        repeat: Option<String>,
     },
     AddToQueue {
         uri: String,
@@ -709,6 +710,14 @@ pub enum Command {
     LoadLikedSongsCache {
         generation: u64,
     },
+    StoreOfflineLibrary {
+        user: crate::api::models::User,
+        playlists: Vec<crate::api::models::Playlist>,
+    },
+    LoadOfflinePlaylist {
+        account_id: String,
+        id: String,
+    },
     StoreLikedSongsCache(crate::liked::Cache),
     /// Resolve the precise type of Web API singles through the streaming session.
     AlbumTypes(Vec<String>),
@@ -847,6 +856,12 @@ pub enum Event {
         account_id: String,
         generation: u64,
         cache: Option<crate::liked::Cache>,
+    },
+    OfflineLibrary(crate::offline_library::Cache),
+    OfflinePlaylist {
+        account_id: String,
+        id: String,
+        cache: Option<PlaylistCache>,
     },
 }
 
@@ -1896,6 +1911,42 @@ impl Worker {
                 Command::LoadPlaylistCache { id, generation } => {
                     self.load_playlist_cache(id, generation)
                 }
+                Command::StoreOfflineLibrary { user, playlists } => {
+                    if self
+                        .api
+                        .account()
+                        .is_some_and(|account| account.as_str() == user.id)
+                        && playlists.len() <= 10_000
+                    {
+                        let cache = crate::offline_library::Cache::new(user, playlists);
+                        let path = self.dirs.offline_library_cache_file();
+                        if let Err(error) = tokio::task::spawn_blocking(move || {
+                            crate::offline_library::write(&path, &cache)
+                        })
+                        .await
+                        .unwrap_or_else(|error| Err(std::io::Error::other(error)))
+                        {
+                            log::warn!("unable to store offline library: {error}");
+                        }
+                    }
+                }
+                Command::LoadOfflinePlaylist { account_id, id } => {
+                    let path = self
+                        .dirs
+                        .account_playlist_cache_dir(&account_id)
+                        .join(format!("{id}.json"));
+                    let events = self.events.clone();
+                    let waker = self.waker.clone();
+                    tokio::spawn(async move {
+                        let cache = playlist_cache_from_disk(path).await;
+                        let _ = events.send(Event::OfflinePlaylist {
+                            account_id,
+                            id,
+                            cache,
+                        });
+                        waker.wake();
+                    });
+                }
                 Command::StorePlaylistCache {
                     id,
                     generation,
@@ -2106,6 +2157,21 @@ impl Worker {
                     || self.web_client_id.as_deref() == Some(token.client_id.as_str())
                 {
                     if token.has_scopes(crate::auth::WEB_SCOPES) {
+                        if let Some(account_id) = token.account_id.clone() {
+                            let path = self.dirs.offline_library_cache_file();
+                            let events = self.events.clone();
+                            let waker = self.waker.clone();
+                            let cache_lease = lease.clone();
+                            tokio::task::spawn_blocking(move || {
+                                if let Some(cache) =
+                                    crate::offline_library::read(&path, &account_id)
+                                    && cache_lease.current()
+                                {
+                                    let _ = events.send(Event::OfflineLibrary(cache));
+                                    waker.wake();
+                                }
+                            });
+                        }
                         if !self.signed_in {
                             self.emit(Event::Auth(AuthStatus::Connecting));
                         }
@@ -2178,7 +2244,7 @@ impl Worker {
                     let _ = commands.send(Command::SignInEnded { source, attempt });
                     return;
                 }
-                match client.me().await {
+                match client.me_for_verification().await {
                     Ok(user) => {
                         let _ = commands.send(Command::WebVerified {
                             source,
@@ -2270,8 +2336,9 @@ impl Worker {
         }
         if let Some(tokens) = self.web_tokens[web_slot(source).index()].clone() {
             let notice = self.storage_notice(self.credentials.lease(web_slot(source)));
+            let account_id = user.id.clone();
             tokio::spawn(async move {
-                if let Err(error) = tokens.remember().await {
+                if let Err(error) = tokens.remember_verified_account(&account_id).await {
                     notice(error);
                 }
             });
@@ -3177,26 +3244,7 @@ impl Worker {
             .join(format!("{id}.json"));
         let account_id = account.as_str().to_string();
         tokio::spawn(async move {
-            let cache = read_playlist_cache(path)
-                .await
-                .ok()
-                .and_then(|(cached, appendable)| {
-                    let total = cached
-                        .total
-                        .unwrap_or_else(|| cached.items.len().try_into().unwrap_or(u32::MAX));
-                    if cached.items.len() > total as usize
-                        || cached.next_offset.is_some_and(|offset| offset > total)
-                    {
-                        return None;
-                    }
-                    Some(PlaylistCache {
-                        snapshot: cached.snapshot,
-                        items: cached.items,
-                        total,
-                        next_offset: cached.next_offset,
-                        appendable,
-                    })
-                });
+            let cache = playlist_cache_from_disk(path).await;
             let _ = events.send(Event::PlaylistCache {
                 account_id,
                 id,
@@ -3816,7 +3864,16 @@ async fn handle(
         } => {
             let device = device_id.as_deref();
             let result = match action {
-                RemoteAction::Play => routed!(play(device, play.as_ref())),
+                RemoteAction::Play => {
+                    if repeat.is_empty() {
+                        routed!(play(device, play.as_ref()))
+                    } else {
+                        match routed!(set_repeat(&repeat, device)) {
+                            Ok(()) => routed!(play(device, play.as_ref())),
+                            Err(error) => Err(error),
+                        }
+                    }
+                }
                 RemoteAction::Pause => routed!(pause(device)),
                 RemoteAction::Next => routed!(next(device)),
                 RemoteAction::Previous => routed!(previous(device)),
@@ -3827,10 +3884,23 @@ async fn handle(
             };
             ApiResponse::Remote { action, result }
         }
-        ApiRequest::ShufflePlay { device_id, play } => {
+        ApiRequest::ShufflePlay {
+            device_id,
+            play,
+            repeat,
+        } => {
             let device = device_id.as_deref();
             let result = match routed!(set_shuffle(true, device)) {
-                Ok(()) => routed!(play(device, Some(&play))),
+                Ok(()) => {
+                    if let Some(repeat) = repeat {
+                        match routed!(set_repeat(&repeat, device)) {
+                            Ok(()) => routed!(play(device, Some(&play))),
+                            Err(error) => Err(error),
+                        }
+                    } else {
+                        routed!(play(device, Some(&play)))
+                    }
+                }
                 Err(error) => Err(error),
             };
             ApiResponse::Remote {
@@ -4063,6 +4133,29 @@ async fn read_playlist_cache(path: std::path::PathBuf) -> std::io::Result<(Cache
     })
     .await
     .map_err(std::io::Error::other)?
+}
+
+async fn playlist_cache_from_disk(path: std::path::PathBuf) -> Option<PlaylistCache> {
+    read_playlist_cache(path)
+        .await
+        .ok()
+        .and_then(|(cached, appendable)| {
+            let total = cached
+                .total
+                .unwrap_or_else(|| cached.items.len().try_into().unwrap_or(u32::MAX));
+            if cached.items.len() > total as usize
+                || cached.next_offset.is_some_and(|offset| offset > total)
+            {
+                return None;
+            }
+            Some(PlaylistCache {
+                snapshot: cached.snapshot,
+                items: cached.items,
+                total,
+                next_offset: cached.next_offset,
+                appendable,
+            })
+        })
 }
 
 #[cfg(test)]
@@ -5599,6 +5692,7 @@ mod authorization_tests {
                     .copied()
                     .collect::<Vec<_>>()
                     .join(" "),
+                account_id: None,
             };
             runtime
                 .block_on(lease.save(StoredGrant::Web(token)))

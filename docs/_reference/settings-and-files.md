@@ -28,11 +28,37 @@ Spotifast follows each platform's conventions. On Linux:
 | Artwork cache | `~/.cache/spotifast/art/` | Always |
 | Lyrics cache | `~/.cache/spotifast/lyrics/` | Always |
 | Account-scoped playlist page cache | `~/.cache/spotifast/playlists/<account-id>/` | Always |
+| Last verified playlist library | `~/.cache/spotifast/offline-library.json` | Always |
 | Last run's log | `~/.local/state/spotifast/spotifast.log` | Always |
 | Crash log | `~/.local/state/spotifast/panic.log` | Always |
 
 Clearing caches never signs you out. Sign-out from Settings covers the shared
 and personal Web API grants and the independent playback credential.
+
+The local session also remembers Shuffle, Repeat, playlist text filters, the
+library text filter, and the Back/Forward navigation history. The queue and
+lyrics panels retain which one was open. These choices survive restarts;
+initial idle playback snapshots do not reset the remembered playback modes.
+Changes made through Spotify Connect during active playback still update them.
+Older session files remain readable and use the previous defaults for fields
+they do not contain.
+
+The session saves the last song's title, artists, album, duration, artwork URLs,
+and playback position. The existing player bar shows it paused immediately on
+relaunch, including before reconnecting, and reuses artwork already cached on
+disk. Displaying this saved song requires no catalogue request; its details
+refresh through the existing track request after connection returns. Old session
+files without this metadata fetch it through the existing track request.
+
+The last complete playlist list and profile are saved after Spotify verifies
+the account. On the next launch, a saved Web API grant fills the usual playlist
+sidebar and pages while Spotifast reconnects. Playlists opened before can show
+their saved song prefix without a live snapshot check. Playback and editing
+remain unavailable until connection returns. When Spotify responds, the live library
+replaces the saved list after all its pages arrive; a failed refresh leaves
+the saved list visible. Cache files contain no credentials and are ignored
+without a protected Web API grant for the same verified account. Older grants
+must be verified online once before they can unlock this view.
 
 The following credential storage is available since 0.8.0.
 

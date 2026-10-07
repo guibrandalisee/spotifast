@@ -47,6 +47,13 @@ Since 0.9.0, starting another song on this computer keeps the
 selected Repeat mode, with Shuffle on or off. Loading a playlist no longer
 silently disables repeat in the playback engine.
 
+Shuffle and Repeat selections are also remembered across app restarts.
+An idle playback engine connecting at startup does not replace those choices
+with its defaults. Changes from another Connect client during active playback
+remain authoritative after pending local commands settle.
+Starting playback on another device applies the remembered Repeat mode before
+the play request; shuffled playback also enables Shuffle before starting.
+
 Since 0.9.0, silencing the old song during a local track change
 keeps the decoder paced while the replacement loads. Cached audio no longer
 races to the end and causes an unwanted extra skip during that handoff.

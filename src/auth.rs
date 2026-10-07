@@ -343,6 +343,9 @@ pub struct StoredToken {
     pub expires_at: u64,
     #[serde(default)]
     pub scope: String,
+    /// Set only after Spotify verifies this grant's account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
 }
 
 impl StoredToken {
@@ -361,6 +364,7 @@ impl StoredToken {
             refresh_token,
             expires_at: now_secs() + response.expires_in.unwrap_or(3600),
             scope: response.scope.unwrap_or_default(),
+            account_id: None,
         })
     }
 
@@ -600,6 +604,17 @@ mod tests {
         let path = dir.join("token.json");
         token.save(&path).unwrap();
         assert_eq!(StoredToken::load(&path), Some(token));
+        assert!(
+            !std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("account_id")
+        );
+        let verified = StoredToken {
+            account_id: Some("alice".into()),
+            ..expired
+        };
+        verified.save(&path).unwrap();
+        assert_eq!(StoredToken::load(&path), Some(verified));
         StoredToken::remove(&path);
         let _ = std::fs::remove_dir_all(dir);
     }

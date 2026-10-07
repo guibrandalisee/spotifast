@@ -133,6 +133,10 @@ impl AppDirs {
             .join(format!("{account}.json"))
     }
 
+    pub fn offline_library_cache_file(&self) -> PathBuf {
+        self.cache.join("offline-library.json")
+    }
+
     pub fn ensure(&self) -> std::io::Result<()> {
         for dir in [&self.config, &self.state, &self.cache] {
             std::fs::create_dir_all(dir)?;
