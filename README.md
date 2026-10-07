@@ -158,3 +158,5 @@ Spotify is a trademark of Spotify AB.
 Licensed under the [MIT License](LICENSE).
 
 The player bar visualizer can be selected in Settings → Appearance. Disable **Change visualizer by clicking the player bar** there to prevent accidental changes from clicks on the controls bar.
+
+Resuming from the cached player bar keeps the saved playlist and song position, including when catalogue verification is rate limited. Pausing local playback also preserves its playlist context.

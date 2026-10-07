@@ -1363,7 +1363,10 @@ impl App {
                         crate::link::canonical_context_uri(&context.uri) != assumed.uri
                     })
             });
-            if held || (!contradicted && self.believed_playing()) {
+            // Paused local playback still owns its context. Catalogue polls
+            // may be unavailable (including during rate limits).
+            let has_local_playback = self.local.is_active() && self.target() == Target::Local;
+            if held || (!contradicted && (has_local_playback || self.believed_playing())) {
                 return (!assumed.uri.is_empty()).then(|| assumed.uri.clone());
             }
         }
@@ -2843,7 +2846,7 @@ impl App {
         if now.local {
             self.last_now_playing_sequence = self.local.track_sequence;
         }
-        self.resume_context = self.playing_context_uri();
+        self.remember_resume_context(&now);
         self.resume_track = Some(now.uri.clone());
         self.resume_position_ms = 0;
         if now.local
@@ -7072,6 +7075,10 @@ impl App {
         if let Some(context) = request.context_uri.clone() {
             self.note_recent_context(&context);
         }
+        // Remember the source at the command, even if no catalogue poll arrives.
+        // An explicit standalone play clears the old collection.
+        self.resume_context = request.context_uri.clone();
+        self.session_dirty = true;
         // Show a context as playing at once, or clear the previous context
         // for a plain track list. Spotify's state catches up behind it.
         self.assumed_context = Some(AssumedContext {
@@ -10300,12 +10307,28 @@ impl App {
         }
     }
 
+    /// A missing poll context cannot erase the source of the same song.
+    /// An explicit standalone request or a different context remains authoritative.
+    fn remember_resume_context(&mut self, now: &NowPlaying) {
+        let context = self.playing_context_uri();
+        let standalone = self
+            .assumed_context
+            .as_ref()
+            .is_some_and(|context| context.uri.is_empty());
+        if context.is_some() || standalone || self.resume_track.as_deref() != Some(now.uri.as_str())
+        {
+            self.resume_context = context;
+        }
+    }
+
     /// Write the restorable session, including navigation and playback choices.
     fn save_session(&mut self) {
         self.remember_playlist_filters();
         self.session_dirty = false;
         self.last_session_save = Instant::now();
-        if let Some(now) = self.now_playing() {
+        // The cached player-bar preview is not a new playback observation.
+        // Its playlist and position already belong to the saved session.
+        if let Some(now) = self.now_playing_live() {
             if !now.is_episode
                 && now.uri.starts_with("spotify:track:")
                 && let Some(id) = util::uri_id(&now.uri)
@@ -10337,7 +10360,7 @@ impl App {
                 }
                 self.track_cache.insert(id.to_string(), track);
             }
-            self.resume_context = self.playing_context_uri();
+            self.remember_resume_context(&now);
             self.resume_track = Some(now.uri.clone());
             self.resume_position_ms = now.position_ms;
         }
@@ -12799,6 +12822,86 @@ mod tests {
         app.resume_position_ms = 19_566;
         app.seek(90_000);
         assert_eq!(app.resume_position_ms, 90_000);
+    }
+
+    #[test]
+    fn saving_the_cached_preview_keeps_the_playlist_for_cold_resume() {
+        let mut app = headless_app();
+        app.resume_context = Some("spotify:playlist:pl1".into());
+        app.resume_track = Some("spotify:track:abc".into());
+        app.resume_position_ms = 19_566;
+        app.shuffle_wanted = true;
+        app.track_cache.insert(
+            "abc".into(),
+            Track {
+                id: Some("abc".into()),
+                uri: "spotify:track:abc".into(),
+                name: "Cached song".into(),
+                ..Default::default()
+            },
+        );
+        assert!(app.now_playing().unwrap().resuming);
+        assert!(app.now_playing_live().is_none());
+        app.save_session();
+        let saved = SessionState::load(&app.dirs.session_file());
+        assert_eq!(saved.last_context.as_deref(), Some("spotify:playlist:pl1"));
+        assert_eq!(saved.last_position_ms, 19_566);
+        assert!(saved.shuffle_on);
+        app.toggle_play();
+        let request = app.queued_play.as_ref().unwrap();
+        assert_eq!(request.context_uri.as_deref(), Some("spotify:playlist:pl1"));
+        assert_eq!(request.offset_uri.as_deref(), Some("spotify:track:abc"));
+        assert_eq!(request.position_ms, 19_566);
+        app.backend.shutdown();
+    }
+
+    #[test]
+    fn a_missing_context_poll_keeps_the_known_source_of_the_same_song() {
+        let mut app = headless_app();
+        app.resume_context = Some("spotify:playlist:pl1".into());
+        app.resume_track = Some("spotify:track:abc".into());
+        app.local_ready = true;
+        app.local.connected = true;
+        app.local.playback = Playback::Paused;
+        app.local.track = Some(crate::player::LocalTrack {
+            uri: "spotify:track:abc".into(),
+            ..Default::default()
+        });
+        app.save_session();
+        assert_eq!(app.resume_context.as_deref(), Some("spotify:playlist:pl1"));
+        // A different song with no known source must not inherit the old playlist.
+        app.local.track.as_mut().unwrap().uri = "spotify:track:other".into();
+        app.save_session();
+        assert_eq!(app.resume_context, None);
+        app.backend.shutdown();
+    }
+
+    #[test]
+    fn paused_local_playback_keeps_its_context_without_catalogue_polls() {
+        let mut app = headless_app();
+        app.local_ready = true;
+        app.local.connected = true;
+        app.local.playback = Playback::Paused;
+        app.local.track = Some(crate::player::LocalTrack {
+            uri: "spotify:track:abc".into(),
+            ..Default::default()
+        });
+        app.assumed_context = Some(AssumedContext {
+            uri: "spotify:playlist:pl1".into(),
+            shuffle: Some(true),
+            at: Instant::now() - ASSUMED_CONTEXT_HOLD - Duration::from_secs(1),
+        });
+        app.save_session();
+        let saved = SessionState::load(&app.dirs.session_file());
+        assert_eq!(saved.last_context.as_deref(), Some("spotify:playlist:pl1"));
+        // A deliberate standalone play must not inherit that playlist.
+        app.play_request(
+            PlayRequest::tracks(vec!["spotify:track:other".into()]),
+            false,
+        );
+        assert_eq!(app.resume_context, None);
+        assert_eq!(app.playing_context_uri(), None);
+        app.backend.shutdown();
     }
 
     /// Play resumes the remembered track at its saved position.

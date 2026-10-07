@@ -122,6 +122,10 @@ not consume a queue row or restore an older queue saved on this computer.
    Toggling shuffle rechecks the queue so the new playback order appears
    promptly without waiting for the song to finish.
 
+The cached last-song preview preserves its saved playlist until playback resumes.
+Pausing local playback and missing catalogue polls do not erase its known context.
+An explicit standalone play still clears the previous playlist context.
+
 9. **Closing the app keeps the queue.** Spotifast saves it locally. When you
    resume the last song, it restores your queued songs and playlist position.
 
