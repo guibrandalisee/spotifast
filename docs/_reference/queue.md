@@ -150,3 +150,7 @@ counts once, and the notification reports only the rows actually added.
     target: it plays from the current context, not from a list Spotifast
     can rewrite. While *Playing next* is empty, drop the song on the player
     bar's Queue button instead.
+
+When Spotify substitutes an available release, resuming uses the original track
+URI requested by the playlist, with the saved position. The substituted release
+URI remains the displayed song identity; it is not used to locate a playlist row.

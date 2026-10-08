@@ -545,6 +545,7 @@ pub struct App {
     /// What was playing when the app last closed, to resume from cold.
     pub resume_context: Option<String>,
     pub resume_track: Option<String>,
+    resume_context_track: Option<String>,
     /// Disk metadata remains visible while its first online refresh runs.
     resume_metadata_refresh_needed: bool,
     pub resume_position_ms: u32,
@@ -972,6 +973,7 @@ impl App {
             recent_contexts: session.recent_contexts.clone(),
             resume_context: session.last_context.clone(),
             resume_track: session.last_track.clone(),
+            resume_context_track: session.last_context_track.clone(),
             resume_metadata_refresh_needed: session.last_track_metadata.is_some(),
             resume_position_ms: session.last_position_ms,
             resume_queue: session.last_added_queue.clone(),
@@ -2706,6 +2708,7 @@ impl App {
             uris[target].clone()
         };
         self.cache_track_from_context(&context, &next);
+        self.resume_context_track = None;
         self.resume_track = Some(next);
         self.resume_position_ms = 0;
         self.session_dirty = true;
@@ -7078,6 +7081,7 @@ impl App {
         // Remember the source at the command, even if no catalogue poll arrives.
         // An explicit standalone play clears the old collection.
         self.resume_context = request.context_uri.clone();
+        self.resume_context_track = request.offset_uri.clone();
         self.session_dirty = true;
         // Show a context as playing at once, or clear the previous context
         // for a plain track list. Spotify's state catches up behind it.
@@ -7476,7 +7480,8 @@ impl App {
             return false;
         };
         let mut request = match self.resume_context.clone() {
-            Some(context) => PlayRequest::context(context).starting_at_uri(track),
+            Some(context) => PlayRequest::context(context)
+                .starting_at_uri(self.resume_context_track.clone().unwrap_or(track)),
             None => PlayRequest::tracks(vec![track]),
         };
         request.position_ms = self.resume_position_ms;
@@ -10310,6 +10315,11 @@ impl App {
     /// A missing poll context cannot erase the source of the same song.
     /// An explicit standalone request or a different context remains authoritative.
     fn remember_resume_context(&mut self, now: &NowPlaying) {
+        if now.local && !self.local.loading {
+            self.resume_context_track = self.local.context_track_uri.clone();
+        } else if !now.local || self.resume_track.as_deref() != Some(now.uri.as_str()) {
+            self.resume_context_track = None;
+        }
         let context = self.playing_context_uri();
         let standalone = self
             .assumed_context
@@ -10370,6 +10380,7 @@ impl App {
                 recent_contexts: self.recent_contexts.clone(),
                 last_context: self.resume_context.clone(),
                 last_track: self.resume_track.clone(),
+                last_context_track: self.resume_context_track.clone(),
                 last_track_metadata: self
                     .resume_track
                     .as_deref()
@@ -12822,6 +12833,53 @@ mod tests {
         app.resume_position_ms = 19_566;
         app.seek(90_000);
         assert_eq!(app.resume_position_ms, 90_000);
+    }
+
+    #[test]
+    fn resuming_an_alternative_release_uses_the_original_playlist_uri() {
+        let mut app = headless_app();
+        app.local_ready = true;
+        app.local.connected = true;
+        app.local.playback = Playback::Paused;
+        app.local.track = Some(crate::player::LocalTrack {
+            uri: "spotify:track:alternative".into(),
+            title: "Same recording".into(),
+            ..Default::default()
+        });
+        app.local.context_track_uri = Some("spotify:track:original".into());
+        app.local.position_ms = 19_566;
+        app.assumed_context = Some(AssumedContext {
+            uri: "spotify:playlist:pl1".into(),
+            shuffle: Some(true),
+            at: Instant::now(),
+        });
+        app.save_session();
+        let saved = SessionState::load(&app.dirs.session_file());
+        assert_eq!(
+            saved.last_track.as_deref(),
+            Some("spotify:track:alternative")
+        );
+        assert_eq!(
+            saved.last_context_track.as_deref(),
+            Some("spotify:track:original")
+        );
+        assert_eq!(saved.last_position_ms, 19_566);
+        app.local = LocalState::default();
+        app.local_ready = true;
+        app.assumed_context = None;
+        app.resume_context = saved.last_context;
+        app.resume_track = saved.last_track;
+        app.resume_context_track = saved.last_context_track;
+        app.resume_position_ms = saved.last_position_ms;
+        app.toggle_play();
+        let request = app.queued_play.as_ref().unwrap();
+        assert_eq!(request.context_uri.as_deref(), Some("spotify:playlist:pl1"));
+        assert_eq!(
+            request.offset_uri.as_deref(),
+            Some("spotify:track:original")
+        );
+        assert_eq!(request.position_ms, 19_566);
+        app.backend.shutdown();
     }
 
     #[test]

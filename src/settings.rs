@@ -1512,6 +1512,9 @@ pub struct SessionState {
     /// What was playing when the app closed, to resume from a cold start.
     pub last_context: Option<String>,
     pub last_track: Option<String>,
+    /// Original occurrence URI in the playlist, before market substitution.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_context_track: Option<String>,
     /// Metadata needed to display the remembered song before the network responds.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_track_metadata: Option<crate::api::models::Track>,

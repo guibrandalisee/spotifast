@@ -165,6 +165,8 @@ impl LocalTrack {
 pub struct LocalState {
     pub playback: Playback,
     pub track: Option<LocalTrack>,
+    /// URI requested by the context, before the decoder chooses an alternative.
+    pub context_track_uri: Option<String>,
     pub position_ms: u32,
     /// When `position_ms` was observed; `None` while not advancing.
     pub position_at: Option<Instant>,
@@ -848,19 +850,29 @@ fn apply_event(state: &mut LocalState, event: PlayerEvent) -> bool {
             changed |= set(&mut state.position_at, None);
             changed
         }
-        PlayerEvent::Loading { position_ms, .. } => {
+        PlayerEvent::Loading {
+            position_ms,
+            track_id,
+            ..
+        } => {
             let mut changed = if state.playback == Playback::Stopped {
                 set(&mut state.playback, Playback::Loading)
             } else {
                 false
             };
+            changed |= set(&mut state.context_track_uri, track_id.to_uri().ok());
             changed |= set(&mut state.loading, true);
             changed |= set(&mut state.position_ms, position_ms);
             changed |= set(&mut state.position_at, None);
             changed |= set(&mut state.error, None);
             changed
         }
-        PlayerEvent::Playing { position_ms, .. } => {
+        PlayerEvent::Playing {
+            position_ms,
+            track_id,
+            ..
+        } => {
+            set(&mut state.context_track_uri, track_id.to_uri().ok());
             set(&mut state.playback, Playback::Playing);
             set(&mut state.position_ms, position_ms);
             state.position_at = Some(Instant::now());
@@ -868,8 +880,13 @@ fn apply_event(state: &mut LocalState, event: PlayerEvent) -> bool {
             start_replay(state);
             true
         }
-        PlayerEvent::Paused { position_ms, .. } => {
-            let mut changed = set(&mut state.playback, Playback::Paused);
+        PlayerEvent::Paused {
+            position_ms,
+            track_id,
+            ..
+        } => {
+            let mut changed = set(&mut state.context_track_uri, track_id.to_uri().ok());
+            changed |= set(&mut state.playback, Playback::Paused);
             changed |= set(&mut state.loading, false);
             changed |= set(&mut state.position_ms, position_ms);
             changed |= set(&mut state.position_at, None);
@@ -1361,6 +1378,56 @@ mod tests {
                 disc_number: 1,
             },
         }
+    }
+
+    #[test]
+    fn playback_events_keep_the_requested_uri_when_audio_uses_an_alternative() {
+        let mut state = LocalState::default();
+        let mut item = interlude();
+        item.uri = "spotify:track:alternative".into();
+        apply_event(
+            &mut state,
+            PlayerEvent::Loading {
+                track_id: uri(),
+                play_request_id: 1,
+                position_ms: 19_566,
+            },
+        );
+        apply_event(
+            &mut state,
+            PlayerEvent::TrackChanged {
+                audio_item: Box::new(item),
+            },
+        );
+        apply_event(
+            &mut state,
+            PlayerEvent::Playing {
+                track_id: uri(),
+                play_request_id: 1,
+                position_ms: 19_566,
+            },
+        );
+        assert_eq!(
+            state.track.as_ref().unwrap().uri,
+            "spotify:track:alternative"
+        );
+        assert_eq!(
+            state.context_track_uri.as_deref(),
+            Some(uri().to_uri().unwrap().as_str())
+        );
+        apply_event(
+            &mut state,
+            PlayerEvent::Paused {
+                track_id: uri(),
+                play_request_id: 1,
+                position_ms: 20_000,
+            },
+        );
+        assert_eq!(
+            state.context_track_uri.as_deref(),
+            Some(uri().to_uri().unwrap().as_str())
+        );
+        assert_eq!(state.position_ms, 20_000);
     }
 
     #[test]

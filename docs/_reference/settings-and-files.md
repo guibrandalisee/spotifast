@@ -534,3 +534,8 @@ For a manual installation, remove only
 Packaged launches recreate missing integration files. To disable the hook
 while keeping the package installed, leave that hook file empty instead;
 existing user files are preserved. Selecting Dark or Light is sufficient to stop following Omarchy's colors.
+
+The last session also keeps the engine-requested track URI as `last_context_track`.
+Spotify may play an available release with a different URI; resuming uses the
+original playlist URI while retaining the heard release metadata and position.
+Older session files without this field use `last_track` as before.
