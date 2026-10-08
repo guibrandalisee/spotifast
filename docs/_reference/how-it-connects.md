@@ -6,6 +6,16 @@ nav_order: 1
 
 ## Independent grants, once each
 
+In this personal fork, offline playlist downloads request complete audio files
+through librespot's loader in random-access mode, instead of relying on playback
+read-ahead. Transient metadata, audio-key and file-transfer failures have up to
+three attempts with bounded backoff. Explicit Spotify audio-key refusals are not
+retried as timeouts. A song failure is recorded and the next song proceeds.
+Metadata alternatives and Ogg/MP3 format preferences follow librespot playback. Each completed track checkpoints the playlist
+manifest atomically. Partial manifests retain reusable tracks, remain playable,
+and cannot mark a playlist complete. A retry verifies ciphertext size, checksum
+and protected-key availability before reusing a completed song.
+
 Spotifast uses separate credentials for Web API access, a personal app, and
 local playback:
 
@@ -320,7 +330,9 @@ uses the Web API for subsequent control requests.
 
 ## The engine
 
-This personal fork also has an explicitly selected offline playlist player.
+This personal fork also has a local offline playlist player. Normal playlist
+Play and song-row commands automatically select saved audio on this computer;
+remote Connect targets retain their remote routing.
 Downloading first reads all playlist pages through the active librespot session,
 then requests each supported song's audio metadata, encrypted audio and audio key
 sequentially. Ciphertext and a complete playlist snapshot are saved atomically
@@ -329,7 +341,7 @@ only in the platform credential store, with the same worker and sign-out
 generation guards as playback credentials. No key or plaintext audio is written
 to JSON or logs. Repeated songs remain repeated in playback order.
 
-**Play offline** loads local metadata and protected keys, verifies audio size
+Offline playback loads local metadata and protected keys, verifies audio size
 and SHA-256, and starts a local decoder without authenticating a Spotify session
 or registering a Connect device. It uses the normal output, EQ, visualizers and
 volume path. Connect playback is stopped when offline playback starts. Offline

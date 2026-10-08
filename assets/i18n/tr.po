@@ -3201,3 +3201,7 @@ msgstr "İndirme tamamlandı"
 #: src/app.rs src/ui/collection.rs
 msgid "Preparing offline playback…"
 msgstr "Çevrimdışı oynatma hazırlanıyor…"
+
+#: src/ui/collection.rs src/theme.rs
+msgid "Available offline"
+msgstr "Çevrimdışı kullanılabilir"

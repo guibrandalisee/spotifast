@@ -3214,3 +3214,7 @@ msgstr "Transferência concluída"
 #: src/app.rs src/ui/collection.rs
 msgid "Preparing offline playback…"
 msgstr "A preparar reprodução offline…"
+
+#: src/ui/collection.rs src/theme.rs
+msgid "Available offline"
+msgstr "Disponível offline"

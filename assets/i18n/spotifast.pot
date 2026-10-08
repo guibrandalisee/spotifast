@@ -3088,3 +3088,7 @@ msgstr ""
 #: src/app.rs src/ui/collection.rs
 msgid "Preparing offline playback…"
 msgstr ""
+
+#: src/ui/collection.rs src/theme.rs
+msgid "Available offline"
+msgstr ""

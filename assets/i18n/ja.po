@@ -3186,3 +3186,7 @@ msgstr "ダウンロード完了"
 #: src/app.rs src/ui/collection.rs
 msgid "Preparing offline playback…"
 msgstr "オフライン再生を準備中…"
+
+#: src/ui/collection.rs src/theme.rs
+msgid "Available offline"
+msgstr "オフラインで利用可能"

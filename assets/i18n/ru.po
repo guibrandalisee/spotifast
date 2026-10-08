@@ -3229,3 +3229,7 @@ msgstr "Загрузка завершена"
 #: src/app.rs src/ui/collection.rs
 msgid "Preparing offline playback…"
 msgstr "Подготовка офлайн-воспроизведения…"
+
+#: src/ui/collection.rs src/theme.rs
+msgid "Available offline"
+msgstr "Доступно офлайн"

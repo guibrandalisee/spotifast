@@ -758,22 +758,43 @@ pub fn apply_flags(app: &mut App, page: Option<&str>, show: Option<&str>) {
     for surface in show.unwrap_or("").split(',').map(str::trim) {
         match surface {
             "offline-download" => {
+                app.downloaded_tracks.insert(
+                    "pl1".into(),
+                    (0..40).map(|index| track(index).uri).collect(),
+                );
                 app.downloads.insert(
                     "pl1".into(),
                     crate::offline::Status::Ready {
-                        tracks: 30,
+                        tracks: 40,
                         skipped: 0,
                     },
                 );
                 app.open(Page::Playlist("pl1".into()));
             }
             "offline-downloading" => {
+                app.downloaded_tracks.insert(
+                    "pl1".into(),
+                    (0..12).map(|index| track(index).uri).collect(),
+                );
                 app.downloads.insert(
                     "pl1".into(),
                     crate::offline::Status::Downloading {
                         done: 12,
-                        total: 30,
+                        total: 40,
                     },
+                );
+                app.open(Page::Playlist("pl1".into()));
+            }
+            "offline-failed" => {
+                app.downloaded_tracks.insert(
+                    "pl1".into(),
+                    (0..10).map(|index| track(index).uri).collect(),
+                );
+                app.downloads.insert(
+                    "pl1".into(),
+                    crate::offline::Status::Failed(
+                        "Connection interrupted. Retry to resume.".into(),
+                    ),
                 );
                 app.open(Page::Playlist("pl1".into()));
             }

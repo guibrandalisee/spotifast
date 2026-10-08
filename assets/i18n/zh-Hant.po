@@ -3115,3 +3115,7 @@ msgstr "下載完成"
 #: src/app.rs src/ui/collection.rs
 msgid "Preparing offline playback…"
 msgstr "正在準備離線播放…"
+
+#: src/ui/collection.rs src/theme.rs
+msgid "Available offline"
+msgstr "可離線播放"

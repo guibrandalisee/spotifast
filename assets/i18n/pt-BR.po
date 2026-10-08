@@ -3204,3 +3204,7 @@ msgstr "Download concluído"
 #: src/app.rs src/ui/collection.rs
 msgid "Preparing offline playback…"
 msgstr "Preparando reprodução offline…"
+
+#: src/ui/collection.rs src/theme.rs
+msgid "Available offline"
+msgstr "Disponível offline"

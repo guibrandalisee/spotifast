@@ -1450,6 +1450,7 @@ fn track_row_contents(
     );
 
     // Title and artists.
+    let downloaded = app.is_downloaded(row.item.uri());
     let title_color = if unavailable {
         palette.dim
     } else if is_current {
@@ -1470,6 +1471,9 @@ fn track_row_contents(
         );
         child.set_clip_rect(title_rect.intersect(ui.clip_rect()));
         child.spacing_mut().item_spacing = vec2(6.0, 0.0);
+        if downloaded {
+            theme::offline_badge(&mut child, app.locale, 15.0);
+        }
         theme::text(
             &mut child,
             row.item.name(),
@@ -1572,6 +1576,9 @@ fn track_row_contents(
             ui.set_max_width(title_rect.width());
             match row.item {
                 PlayableItem::Track(track) => {
+                    if downloaded {
+                        theme::offline_badge(ui, app.locale, 15.0);
+                    }
                     if track.explicit {
                         explicit_badge(ui, &palette);
                     }

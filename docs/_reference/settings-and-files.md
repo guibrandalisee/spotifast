@@ -545,6 +545,6 @@ In this personal fork, offline playlists live under the state directory's
 playlist snapshot, audio identifiers, sizes and SHA-256 digests; the audio files
 remain encrypted. Their keys live in separate platform credential-store entries,
 scoped to this profile, account, playlist and audio file. **Remove download** in
-the playlist's More menu deletes that playlist's files and keys. Clearing the
+  the playlist's download-button menu deletes that playlist's files and keys. Clearing the
 ordinary audio cache does not remove downloads. Existing settings and session
 files require no migration.

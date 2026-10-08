@@ -1258,6 +1258,13 @@ fn contents(app: &mut App, ui: &mut egui::Ui, grid_art: Option<Rect>) {
             let art = app.backend.art().clone();
             super::widgets::virtual_rows(ui, entries.len(), row_height, |ui, index| {
                 let entry = &entries[index];
+                let downloaded = match &entry.page {
+                    Page::Playlist(id) => matches!(
+                        app.downloads.get(id),
+                        Some(crate::offline::Status::Ready { .. })
+                    ),
+                    _ => false,
+                };
                 if !app.settings.sidebar_compact
                     && let Some(image) = &entry.image
                 {
@@ -1449,9 +1456,21 @@ fn contents(app: &mut App, ui: &mut egui::Ui, grid_art: Option<Rect>) {
                             theme::medium(14.0),
                             name_color,
                         );
+                        if downloaded {
+                            theme::paint_icon(
+                                ui,
+                                Icon::Downloaded,
+                                Rect::from_center_size(
+                                    pos2(text_left + 7.0, rect.center().y + 10.0),
+                                    Vec2::splat(14.0),
+                                ),
+                                14.0,
+                                theme::OFFLINE_COLOR,
+                            );
+                        }
                         crate::bidi::paint_line(
                             &painter,
-                            text_left,
+                            text_left + if downloaded { 18.0 } else { 0.0 },
                             text_right,
                             rect.center().y + 10.0,
                             &entry.subtitle,

@@ -3196,3 +3196,7 @@ msgstr "Nedladdningen är klar"
 #: src/app.rs src/ui/collection.rs
 msgid "Preparing offline playback…"
 msgstr "Förbereder offlineuppspelning…"
+
+#: src/ui/collection.rs src/theme.rs
+msgid "Available offline"
+msgstr "Tillgänglig offline"

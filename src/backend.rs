@@ -569,10 +569,15 @@ pub enum Command {
     DownloadPlaylist(Playlist),
     RemoveDownload(String),
     PlayOffline(String),
+    PlayOfflineLoad {
+        id: String,
+        load: crate::player::LoadSpec,
+    },
     OfflinePrepared {
         request: u64,
         lease: CredentialLease,
-        result: Result<crate::offline::Prepared, String>,
+        result: Result<Box<crate::offline::Prepared>, String>,
+        load: Option<crate::player::LoadSpec>,
     },
     OpenThemesFolder,
     ProxyRestored {
@@ -767,6 +772,11 @@ pub struct LyricsRequest {
 }
 
 pub enum Event {
+    OfflineTracks {
+        account: String,
+        id: String,
+        uris: Vec<String>,
+    },
     Downloads {
         account: String,
         entries: std::collections::HashMap<String, crate::offline::Status>,
@@ -776,7 +786,7 @@ pub enum Event {
         id: String,
         status: Option<crate::offline::Status>,
     },
-    OfflineStarted(Playlist),
+    OfflineStarted(Playlist, Option<crate::player::LoadSpec>),
     OfflineStopped,
     ProxyRestored {
         config: ProxyConfig,
@@ -1373,6 +1383,8 @@ struct Worker {
     waker: Waker,
     engine: Option<Arc<Engine>>,
     offline_player: Option<crate::offline::OfflinePlayer>,
+    /// Existing authenticated session for downloads while the local decoder plays.
+    offline_download_session: Option<librespot_core::Session>,
     offline_active: Arc<std::sync::atomic::AtomicBool>,
     offline_account: Option<String>,
     offline_request: u64,
@@ -1452,6 +1464,7 @@ impl Worker {
             waker,
             engine: None,
             offline_player: None,
+            offline_download_session: None,
             offline_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             offline_account: None,
             offline_request: 0,
@@ -1494,6 +1507,7 @@ impl Worker {
     fn change_proxy(&mut self, request: u64, proxy: ProxyConfig, sign_in: bool) {
         let result = self.apply_proxy(proxy.clone());
         if result.as_ref().is_ok_and(|restart| *restart) {
+            self.offline_download_session = None;
             self.replace_engine();
         }
         let applied = result.is_ok();
@@ -1722,11 +1736,13 @@ impl Worker {
                 Command::ReadDownloads { account } => self.read_downloads(account),
                 Command::DownloadPlaylist(playlist) => self.download_playlist(playlist),
                 Command::RemoveDownload(id) => self.remove_download(id),
-                Command::PlayOffline(id) => self.play_offline(id),
+                Command::PlayOffline(id) => self.play_offline(id, None),
+                Command::PlayOfflineLoad { id, load } => self.play_offline(id, Some(load)),
                 Command::OfflinePrepared {
                     request,
                     lease,
                     result,
+                    load,
                 } => {
                     if request != self.offline_request || !lease.current() {
                         continue;
@@ -1737,7 +1753,7 @@ impl Worker {
                         let playlist = prepared.manifest.playlist.clone();
                         let notify = self.offline_notify();
                         crate::offline::OfflinePlayer::new(
-                            prepared,
+                            *prepared,
                             self.engine_config.clone(),
                             notify,
                         )
@@ -1748,11 +1764,12 @@ impl Worker {
                             self.offline_active
                                 .store(true, std::sync::atomic::Ordering::SeqCst);
                             if let Some(engine) = &self.engine {
+                                self.offline_download_session = Some(engine.session().clone());
                                 engine.shutdown();
                             }
                             self.engine = None;
                             self.offline_player = Some(player);
-                            self.emit(Event::OfflineStarted(playlist));
+                            self.emit(Event::OfflineStarted(playlist, load));
                         }
                         Err(error) => self.emit(Event::Error(format!("Offline playback: {error}"))),
                     }
@@ -1787,6 +1804,10 @@ impl Worker {
                     self.change_proxy(request, config, false)
                 }
                 Command::Player(command) => {
+                    if matches!(command, PlayerCommand::Load(_)) {
+                        // A newer play command supersedes an offline preparation still in flight.
+                        self.offline_request += 1;
+                    }
                     if let Some(player) = &self.offline_player {
                         if player.accepts(&command) {
                             if let Err(error) = player.command(command) {
@@ -2731,6 +2752,15 @@ impl Worker {
         tokio::task::spawn_blocking(move || {
             let entries = crate::offline::catalog(&dirs, &account);
             if lease.current() {
+                for id in entries.keys() {
+                    if let Ok(manifest) = crate::offline::Manifest::read(&dirs, &account, id) {
+                        let _ = events.send(Event::OfflineTracks {
+                            account: account.clone(),
+                            id: id.clone(),
+                            uris: manifest.available_uris(&dirs),
+                        });
+                    }
+                }
                 let _ = events.send(Event::Downloads { account, entries });
                 waker.wake();
             }
@@ -2741,10 +2771,12 @@ impl Worker {
         let Some(account) = self.download_account() else {
             return;
         };
-        let Some(engine) = self
+        let Some(session) = self
             .engine
-            .clone()
-            .filter(|engine| engine.session().username() == account)
+            .as_ref()
+            .map(|engine| engine.session().clone())
+            .or_else(|| self.offline_download_session.clone())
+            .filter(|session| session.username() == account && !session.is_invalid())
         else {
             self.emit(Event::DownloadStatus {
                 account,
@@ -2766,7 +2798,6 @@ impl Worker {
             return;
         }
         let downloading = self.downloading.clone();
-        let session = engine.session().clone();
         let dirs = self.dirs.clone();
         let bitrate = self.engine_config.bitrate_kbps;
         let lease = self.credentials.lease(CredentialSlot::Playback);
@@ -2778,8 +2809,13 @@ impl Worker {
         let progress_events = events.clone();
         let progress_waker = waker.clone();
         let progress_lease = lease.clone();
-        let progress = Arc::new(move |status| {
+        let progress = Arc::new(move |status, uris| {
             if progress_lease.current() {
+                let _ = progress_events.send(Event::OfflineTracks {
+                    account: progress_account.clone(),
+                    id: progress_id.clone(),
+                    uris,
+                });
                 let _ = progress_events.send(Event::DownloadStatus {
                     account: progress_account.clone(),
                     id: progress_id.clone(),
@@ -2803,7 +2839,7 @@ impl Worker {
             if lease.current() {
                 let status = match result {
                     Ok(manifest) => manifest.status(),
-                    Err(error) => crate::offline::Status::Failed(error.to_string()),
+                    Err(error) => crate::offline::Status::Failed(format!("{error:#}")),
                 };
                 let _ = events.send(Event::DownloadStatus {
                     account,
@@ -2853,7 +2889,7 @@ impl Worker {
         });
     }
 
-    fn play_offline(&mut self, id: String) {
+    fn play_offline(&mut self, id: String, load: Option<crate::player::LoadSpec>) {
         if self.premium == Some(false) {
             self.emit(Event::Error(PREMIUM_NEEDED.into()));
             return;
@@ -2873,11 +2909,11 @@ impl Worker {
         tokio::spawn(async move {
             let result = async {
                 let carried = match carried {
-                    Some(pending) => pending.await?,
+                    Some(pending) => pending.await.unwrap_or_default(),
                     None => Vec::new(),
                 };
                 let prepared = crate::offline::prepare(dirs, account, id, lease.clone()).await?;
-                Ok::<_, anyhow::Error>(prepared.with_manual(carried))
+                Ok::<_, anyhow::Error>(Box::new(prepared.with_manual(carried)))
             }
             .await
             .map_err(|error| error.to_string());
@@ -2885,11 +2921,13 @@ impl Worker {
                 request,
                 lease,
                 result,
+                load,
             });
         });
     }
 
     fn stop_offline(&mut self) {
+        self.offline_download_session = None;
         self.offline_request += 1;
         self.offline_generation
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -5435,6 +5473,17 @@ fn playback_credentials(account: Option<AccountId>, access_token: String) -> Opt
 #[cfg(test)]
 mod authorization_tests {
     use super::*;
+
+    #[test]
+    fn leaving_offline_mode_releases_the_retained_download_session() {
+        let (runtime, mut worker, _) = worker("offline-download-session");
+        let _entered = runtime.enter();
+        worker.offline_download_session =
+            Some(librespot_core::Session::new(Default::default(), None));
+        assert!(worker.offline_download_session.is_some());
+        worker.stop_offline();
+        assert!(worker.offline_download_session.is_none());
+    }
 
     #[test]
     fn playlist_cache_store_does_not_hold_up_the_command_loop() {

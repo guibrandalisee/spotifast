@@ -265,6 +265,9 @@ pub fn actions_row(
                 app.actions.push(Action::SetShuffle(!shuffle));
             }
         }
+        if let Some((Page::Playlist(id), _)) = &actions.reload {
+            download_control(app, ui, id);
+        }
         if let Some((uri, saved)) = &actions.saved {
             let (icon, tooltip, color) = if *saved {
                 (
@@ -367,15 +370,19 @@ pub fn actions_row(
                                     );
                                 });
                             } else {
-                                if app.is_connected()
+                                if matches!(status, Some(crate::offline::Status::Failed(_)))
+                                    && app
+                                        .downloaded_tracks
+                                        .get(id)
+                                        .is_some_and(|tracks| !tracks.is_empty())
                                     && widgets::menu_item(
                                         ui,
                                         &palette,
-                                        Some(Icon::Download),
-                                        &gettext(locale, "Download for offline listening"),
+                                        Some(Icon::PlayFilled),
+                                        &gettext(locale, "Play offline"),
                                     )
                                 {
-                                    app.actions.push(Action::DownloadPlaylist(id.clone()));
+                                    app.actions.push(Action::PlayOffline(id.clone()));
                                 }
                                 if matches!(status, Some(crate::offline::Status::Failed(_)))
                                     && widgets::menu_item(
@@ -425,6 +432,113 @@ pub fn actions_row(
         }
     });
     ui.add_space(14.0);
+}
+
+fn download_control(app: &mut App, ui: &mut egui::Ui, id: &str) {
+    let palette = app.palette;
+    let locale = app.locale;
+    let status = app.downloads.get(id).cloned();
+    let available = app
+        .downloaded_tracks
+        .get(id)
+        .map_or(0, |tracks| tracks.len());
+    let ready = matches!(status, Some(crate::offline::Status::Ready { .. }));
+    let downloading = matches!(status, Some(crate::offline::Status::Downloading { .. }));
+    let label = if ready {
+        gettext(locale, "Available offline")
+    } else if downloading {
+        gettext(locale, "Downloading…")
+    } else if matches!(status, Some(crate::offline::Status::Failed(_))) {
+        gettext(locale, "Retry download")
+    } else {
+        gettext(locale, "Download for offline listening")
+    };
+    let response = ui
+        .add_enabled_ui(ready || (!downloading && app.is_connected()), |ui| {
+            if downloading {
+                let (rect, response) = ui.allocate_exact_size(Vec2::splat(38.0), Sense::hover());
+                egui::Spinner::new()
+                    .size(26.0)
+                    .color(palette.secondary)
+                    .paint_at(ui, rect);
+                response.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::WidgetType::Button, false, &label)
+                });
+                return response.on_hover_text(label.as_ref());
+            }
+            theme::icon_button(
+                ui,
+                if ready {
+                    Icon::Downloaded
+                } else if downloading {
+                    Icon::Loader
+                } else {
+                    Icon::Download
+                },
+                26.0,
+                if ready {
+                    theme::OFFLINE_COLOR
+                } else {
+                    palette.secondary
+                },
+                if ready {
+                    theme::OFFLINE_COLOR
+                } else {
+                    palette.text
+                },
+                &label,
+            )
+        })
+        .inner;
+    if ready {
+        egui::Popup::menu(&response)
+            .frame(widgets::menu_frame(&palette))
+            .show(|ui| {
+                if widgets::menu_item(
+                    ui,
+                    &palette,
+                    Some(Icon::PlayFilled),
+                    &gettext(locale, "Play offline"),
+                ) {
+                    app.actions.push(Action::PlayOffline(id.into()));
+                }
+                if widgets::menu_item(
+                    ui,
+                    &palette,
+                    Some(Icon::Trash),
+                    &gettext(locale, "Remove download"),
+                ) {
+                    app.actions.push(Action::RemoveDownload(id.into()));
+                }
+            });
+    } else if response.clicked() {
+        app.actions.push(Action::DownloadPlaylist(id.into()));
+    }
+    match status {
+        Some(crate::offline::Status::Downloading { done, total }) => {
+            let text = format!("{done}/{total}");
+            theme::text(ui, text, theme::regular(12.5), palette.secondary);
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(100));
+        }
+        Some(crate::offline::Status::Ready { .. }) if ui.available_width() > 550.0 => {
+            theme::text(
+                ui,
+                gettext(locale, "Available offline"),
+                theme::regular(12.5),
+                theme::OFFLINE_COLOR,
+            );
+        }
+        _ if available > 0 => {
+            let text = if ui.available_width() > 550.0 {
+                format!("{available} • {}", gettext(locale, "Available offline"))
+            } else {
+                available.to_string()
+            };
+            theme::text(ui, text, theme::regular(12.5), palette.secondary);
+        }
+        _ => {}
+    }
 }
 
 /// A track table with virtualised rows and paging.
@@ -3597,15 +3711,15 @@ mod tests {
                         tracks: 3,
                         skipped: 0,
                     }),
-                    "Play offline (3)",
+                    "Available offline",
                 ),
                 (
                     Some(crate::offline::Status::Downloading { done: 1, total: 3 }),
-                    "Downloading… 1/3",
+                    "Downloading…",
                 ),
                 (
                     Some(crate::offline::Status::Failed("Interrupted".into())),
-                    "Remove download",
+                    "Retry download",
                 ),
             ] {
                 let ctx = egui::Context::default();
@@ -3657,34 +3771,7 @@ mod tests {
                 };
                 frame(vec![]);
                 let closed = frame(vec![]);
-                let bounds = closed
-                    .nodes
-                    .iter()
-                    .find(|(_, n)| n.label() == Some("More"))
-                    .unwrap()
-                    .1
-                    .bounds()
-                    .unwrap();
-                let pos = pos2(
-                    ((bounds.x0 + bounds.x1) / 2.0) as f32,
-                    ((bounds.y0 + bounds.y1) / 2.0) as f32,
-                );
-                frame(vec![
-                    egui::Event::PointerMoved(pos),
-                    egui::Event::PointerButton {
-                        pos,
-                        button: egui::PointerButton::Primary,
-                        pressed: true,
-                        modifiers: egui::Modifiers::NONE,
-                    },
-                    egui::Event::PointerButton {
-                        pos,
-                        button: egui::PointerButton::Primary,
-                        pressed: false,
-                        modifiers: egui::Modifiers::NONE,
-                    },
-                ]);
-                let open = frame(vec![]);
+                let open = closed;
                 let node = &open
                     .nodes
                     .iter()

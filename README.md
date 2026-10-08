@@ -29,9 +29,12 @@ cannot play music through Spotifast.
 
 ### Personal fork: offline playlists
 
-In a playlist's **More** menu, choose **Download for offline listening** while
-local playback is connected. Wait for **Download complete**, then choose
-**Play offline**. Downloaded playlists can also be opened from the saved library
+Use the circular **Download** button beside Shuffle in a playlist while local
+playback is connected. It shows completed songs and the total while downloading.
+Green download arrows beside songs mark locally available audio. A green playlist
+button and **Available offline** label indicate a completed download; the library
+also marks complete playlists. Click the completed button for **Play offline** or
+**Remove download**. Downloaded playlists can also be opened from the saved library
 after restarting without internet. Pause, seek, next, previous, shuffle, repeat,
 volume, the equalizer and visualizers use local playback. **Remove download**
 removes that playlist's audio and protected keys.
@@ -42,13 +45,21 @@ caches. Audio keys use the operating system credential store. Downloads belong
 to the signed-in account; signing out stops playback and disables key access
 until that account signs in again. An unavailable or locked credential store
 prevents offline playback. Local files, episodes and unavailable playlist rows
-are skipped. A failed download is not shown as complete.
+are skipped. Temporary network failures retry up to three times. Each completed
+song is saved atomically, including its protected key, so an interrupted download
+can be resumed with **Retry download**. Completed songs remain playable even if
+the rest of the playlist fails; the playlist is not marked fully available until
+all supported songs finish. Resuming checks saved audio before reusing it.
+Downloads resolve available Spotify alternatives and accept the Ogg/MP3 formats
+supported by librespot. A failed song does not stop the remaining songs.
+Explicit audio-key refusals are reported instead of retried as network timeouts.
 
 This is a personal implementation, independent of the official Spotify app's
 downloads. It does not import official download files, synchronize offline
 listening history with Spotify, or implement Spotify's official download-license
-renewal mechanism. Start offline playback explicitly from the playlist menu;
-the regular Play button keeps its streaming behavior.
+renewal mechanism. The regular Play button and song rows use downloaded audio
+automatically on this computer. Playing on a selected remote Connect device
+keeps its remote behavior. **Play offline** remains available in the playlist menu.
 
 After a successful sign-in, Spotifast keeps the playlist library and visited
 playlist songs for read-only browsing when it starts without a connection. It

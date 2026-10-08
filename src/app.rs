@@ -313,6 +313,7 @@ pub struct App {
     pub offline_playlist_id: Option<String>,
     pub offline_playlist: Option<PlaylistCache>,
     pub downloads: std::collections::HashMap<String, crate::offline::Status>,
+    pub downloaded_tracks: std::collections::HashMap<String, std::collections::HashSet<String>>,
     pub offline_playing: bool,
     pub local_device_id: Option<String>,
     /// Ignore the previous local song until a Connect transfer reports its track.
@@ -809,6 +810,7 @@ impl App {
             offline_playlist_id: None,
             offline_playlist: None,
             downloads: std::collections::HashMap::new(),
+            downloaded_tracks: std::collections::HashMap::new(),
             offline_playing: false,
             local_device_id: None,
             local_transfer_sequence: None,
@@ -1143,6 +1145,12 @@ impl App {
         self.offline_library.is_some()
             && self.user.is_some()
             && matches!(self.auth, AuthStatus::Starting | AuthStatus::Connecting)
+    }
+
+    pub fn is_downloaded(&self, uri: &str) -> bool {
+        self.downloaded_tracks
+            .values()
+            .any(|tracks| tracks.contains(uri))
     }
 
     pub fn user_id(&self) -> Option<&str> {
@@ -1962,6 +1970,12 @@ impl App {
                 continue;
             }
             match event {
+                Event::OfflineTracks { account, id, uris } => {
+                    if self.user_id() == Some(account.as_str()) {
+                        self.downloaded_tracks
+                            .insert(id, uris.into_iter().collect());
+                    }
+                }
                 Event::Downloads { account, entries } => {
                     if self.user_id() == Some(account.as_str()) {
                         for (id, status) in entries {
@@ -1992,10 +2006,11 @@ impl App {
                             self.downloads.insert(id, status);
                         } else {
                             self.downloads.remove(&id);
+                            self.downloaded_tracks.remove(&id);
                         }
                     }
                 }
-                Event::OfflineStarted(playlist) => {
+                Event::OfflineStarted(playlist, load) => {
                     self.offline_playing = true;
                     self.local_ready = true;
                     self.local.connected = true;
@@ -2010,10 +2025,15 @@ impl App {
                     self.queue_fetched_at = None;
                     self.remote_poll_seq += 1;
                     self.remote_poll_pending = false;
-                    self.play_request(
-                        PlayRequest::context(playlist.uri).starting_at_index(0),
-                        false,
-                    );
+                    if let Some(load) = load {
+                        self.backend.player(PlayerCommand::Load(load));
+                        self.optimistic_playing = Some((true, Instant::now()));
+                    } else {
+                        self.play_request(
+                            PlayRequest::context(playlist.uri).starting_at_index(0),
+                            false,
+                        );
+                    }
                 }
                 Event::OfflineStopped => {
                     self.offline_playing = false;
@@ -2303,6 +2323,7 @@ impl App {
                 self.offline_playlist_id = None;
                 self.offline_playlist = None;
                 self.downloads.clear();
+                self.downloaded_tracks.clear();
                 self.offline_playing = false;
                 self.premium_notice_shown = false;
                 self.local = LocalState::default();
@@ -2548,12 +2569,14 @@ impl App {
                 }
             }
         }
-        if let Some(seed) = autoplay_seed(
-            self.local_list.as_deref(),
-            self.settings.autoplay,
-            &self.local,
-            &state,
-        ) {
+        if !self.offline_playing
+            && let Some(seed) = autoplay_seed(
+                self.local_list.as_deref(),
+                self.settings.autoplay,
+                &self.local,
+                &state,
+            )
+        {
             log::info!("the list ended; playing what Spotify follows {seed} with");
             self.local_list = None;
             self.backend.player(PlayerCommand::Load(LoadSpec {
@@ -5136,6 +5159,7 @@ impl App {
                 Ok(user) => {
                     if self.user_id().is_some_and(|account| account != user.id) {
                         self.downloads.clear();
+                        self.downloaded_tracks.clear();
                         self.offline_playing = false;
                     }
                     self.backend.send(Command::ReadDownloads {
@@ -7106,10 +7130,53 @@ impl App {
     /// With `shuffle_first`, shuffle is turned on before playback starts,
     /// in one ordered exchange: two independent requests race, and shuffle
     /// sometimes lost.
+    fn downloaded_playlist(&self, request: &PlayRequest) -> Option<String> {
+        if let Some(id) = request
+            .context_uri
+            .as_deref()
+            .and_then(|uri| uri.strip_prefix("spotify:playlist:"))
+        {
+            let available = self.downloaded_tracks.get(id)?;
+            return (!available.is_empty()
+                && request
+                    .offset_uri
+                    .as_ref()
+                    .is_none_or(|uri| available.contains(uri)))
+            .then(|| id.to_owned());
+        }
+        let uris: Vec<&String> = request
+            .context_uri
+            .as_ref()
+            .filter(|uri| uri.starts_with("spotify:track:"))
+            .into_iter()
+            .chain(request.uris.iter())
+            .collect();
+        if request
+            .context_uri
+            .as_ref()
+            .is_some_and(|uri| !uri.starts_with("spotify:track:"))
+        {
+            return None;
+        }
+        if uris.is_empty() {
+            return None;
+        }
+        let selected = request.offset_uri.as_ref().or_else(|| {
+            uris.get(request.offset_position.unwrap_or(0) as usize)
+                .copied()
+        })?;
+        self.downloaded_tracks
+            .iter()
+            .find_map(|(id, available)| available.contains(selected).then(|| id.clone()))
+    }
+
     fn play_request(&mut self, request: PlayRequest, shuffle_first: bool) {
         // Shuffle applies across contexts until disabled. A selected row still
         // starts first; otherwise choose a random starting track.
         let mut request = request;
+        let implicit_start = request.offset_uri.is_none()
+            && request.offset_position.is_none()
+            && request.uris.is_empty();
         self.queue_shuffle_pending = None;
         if shuffle_first {
             self.shuffle_wanted = true;
@@ -7130,6 +7197,21 @@ impl App {
             }
         }
         let mut keys: Vec<String> = Vec::new();
+        if implicit_start
+            && !matches!(self.target(), Target::Remote(Some(_)))
+            && let Some(id) = request
+                .context_uri
+                .as_deref()
+                .and_then(|uri| uri.strip_prefix("spotify:playlist:"))
+            && self
+                .downloaded_tracks
+                .get(id)
+                .is_some_and(|uris| !uris.is_empty())
+        {
+            // Start partial playlists from a saved song. The manifest retains playlist order.
+            request.offset_uri = None;
+            request.offset_position = Some(0);
+        }
         if let Some(context) = &request.context_uri {
             keys.push(context.clone());
         }
@@ -7177,6 +7259,25 @@ impl App {
             at: Instant::now(),
         });
         self.queue_start_pending = Some(self.target());
+        if !matches!(self.target(), Target::Remote(Some(_)))
+            && let Some(id) = self.downloaded_playlist(&request)
+            && (!self.offline_playing
+                || self.local_device_id.as_deref() != Some(format!("offline-{id}").as_str()))
+        {
+            let mut load = local_load(&request, shuffle);
+            load.shuffle = Some(shuffle);
+            if !load.uris.is_empty() && load.offset_uri.is_none() {
+                load.offset_uri = load
+                    .uris
+                    .get(load.offset_index.unwrap_or(0) as usize)
+                    .cloned();
+            }
+            load.repeat = Some(self.repeat_wanted.unwrap_or(self.local.repeat));
+            self.queued_play = None;
+            self.backend.send(Command::PlayOfflineLoad { id, load });
+            self.optimistic_playing = Some((true, Instant::now()));
+            return;
+        }
         match self.target() {
             Target::Local if !self.local.connected => {
                 // Hold the request while the local engine reconnects.
@@ -7185,6 +7286,15 @@ impl App {
             Target::Local => {
                 self.queued_play = None;
                 let mut load = local_load(&request, shuffle);
+                if self.offline_playing {
+                    load.shuffle = Some(shuffle);
+                }
+                if self.offline_playing && !load.uris.is_empty() && load.offset_uri.is_none() {
+                    load.offset_uri = load
+                        .uris
+                        .get(load.offset_index.unwrap_or(0) as usize)
+                        .cloned();
+                }
                 load.repeat = Some(self.repeat_wanted.unwrap_or(self.local.repeat));
                 self.shuffle_set_at = Some(Instant::now());
                 self.repeat_set_at = Some(Instant::now());
@@ -7577,6 +7687,24 @@ impl App {
 
     fn toggle_play(&mut self) {
         let playing = self.now_playing().map(|now| now.playing);
+        if !self.offline_playing
+            && playing != Some(true)
+            && !matches!(self.target(), Target::Remote(Some(_)))
+            && let Some(now) = self
+                .now_playing()
+                .filter(|now| self.is_downloaded(&now.uri))
+        {
+            let mut request = self
+                .playing_context_uri()
+                .filter(|uri| uri.starts_with("spotify:playlist:"))
+                .map_or_else(
+                    || PlayRequest::tracks(vec![now.uri.clone()]),
+                    |uri| PlayRequest::context(uri).starting_at_uri(now.uri.clone()),
+                );
+            request.position_ms = now.position_ms;
+            self.play_request(request, false);
+            return;
+        }
         match self.target() {
             Target::Local => {
                 if self.local.is_active() {
@@ -8630,8 +8758,38 @@ impl App {
                 }
                 Action::Open(Page::Settings) => true,
                 Action::PlayOffline(_) | Action::RemoveDownload(_) => true,
-                Action::TogglePlay
-                | Action::Next
+                Action::PlayContext {
+                    uri, offset_uri, ..
+                } => {
+                    let mut request = PlayRequest::context(uri.clone());
+                    request.offset_uri = offset_uri.clone();
+                    self.downloaded_playlist(&request).is_some()
+                }
+                Action::PlayFromRow {
+                    uri,
+                    context,
+                    index,
+                } => {
+                    self.is_downloaded(uri)
+                        || (uri.is_empty()
+                            && matches!(context,
+                        RowContext::View { uris, .. } if uris.get(*index as usize).is_some_and(|uri| self.is_downloaded(uri))))
+                }
+                Action::PlayUris { uris, index } => self
+                    .downloaded_playlist(
+                        &PlayRequest::tracks(uris.clone()).starting_at_index(*index),
+                    )
+                    .is_some(),
+                Action::TogglePlay => {
+                    self.offline_playing
+                        || self
+                            .now_playing()
+                            .is_some_and(|now| self.is_downloaded(&now.uri))
+                }
+                Action::ShufflePlay(uri) => self
+                    .downloaded_playlist(&PlayRequest::context(uri.clone()))
+                    .is_some(),
+                Action::Next
                 | Action::Previous
                 | Action::SetShuffle(_)
                 | Action::Seek(_)
@@ -8643,8 +8801,6 @@ impl App {
                 | Action::ToggleMute
                 | Action::ToggleShuffle
                 | Action::CycleRepeat
-                | Action::PlayFromRow { .. }
-                | Action::PlayContext { .. }
                 | Action::AddToQueue { .. }
                 | Action::QueueMany { .. }
                 | Action::ClearQueue
@@ -16292,6 +16448,74 @@ mod tests {
                 )
             );
         }
+        app.backend.shutdown();
+    }
+
+    #[test]
+    fn offline_selection_uses_saved_audio_and_preserves_the_clicked_song() {
+        let mut app = test_app("offline-play-selection");
+        app.downloaded_tracks.insert(
+            "mix".into(),
+            ["spotify:track:saved".into()].into_iter().collect(),
+        );
+        assert_eq!(
+            app.downloaded_playlist(&PlayRequest::context("spotify:playlist:mix")),
+            Some("mix".into())
+        );
+        assert_eq!(
+            app.downloaded_playlist(
+                &PlayRequest::context("spotify:playlist:mix")
+                    .starting_at_uri("spotify:track:saved")
+            ),
+            Some("mix".into())
+        );
+        assert_eq!(
+            app.downloaded_playlist(
+                &PlayRequest::context("spotify:playlist:mix")
+                    .starting_at_uri("spotify:track:missing")
+            ),
+            None
+        );
+        assert_eq!(
+            app.downloaded_playlist(&PlayRequest::tracks(vec!["spotify:track:saved".into()])),
+            Some("mix".into())
+        );
+        let load = LoadSpec {
+            context_uri: Some("spotify:playlist:mix".into()),
+            offset_uri: Some("spotify:track:saved".into()),
+            position_ms: 1234,
+            play: true,
+            shuffle: Some(true),
+            ..Default::default()
+        };
+        app.handle_backend_events(vec![Event::OfflineStarted(
+            Playlist {
+                id: "mix".into(),
+                uri: "spotify:playlist:mix".into(),
+                ..Default::default()
+            },
+            Some(load.clone()),
+        )]);
+        assert!(app.offline_playing);
+        assert_eq!(
+            app.backend.take_player_commands(),
+            vec![PlayerCommand::Load(load)]
+        );
+        assert!(app.backend.take_remote_play_requests().is_empty());
+        app.offline_playing = false;
+        app.local.playback = Playback::Paused;
+        app.local.track = Some(crate::player::LocalTrack {
+            uri: "spotify:track:saved".into(),
+            duration_ms: 30_000,
+            ..Default::default()
+        });
+        app.optimistic_playing = None;
+        app.toggle_play();
+        assert!(
+            app.backend.take_player_commands().is_empty(),
+            "Resume of downloaded audio must not toggle the streaming engine"
+        );
+        assert!(app.queued_play.is_none());
         app.backend.shutdown();
     }
 

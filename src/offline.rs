@@ -12,7 +12,10 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use librespot_audio::{AudioDecrypt, AudioFile};
-use librespot_core::{Session, SpotifyUri, audio_key::AudioKey};
+use librespot_core::{
+    Session, SpotifyUri,
+    audio_key::{AudioKey, AudioKeyError},
+};
 use librespot_metadata::audio::{AudioFileFormat, AudioItem};
 use librespot_playback::{
     config::VolumeCtrl,
@@ -45,6 +48,15 @@ pub struct DownloadedTrack {
     file: String,
     size: u64,
     sha256: String,
+    #[serde(default)]
+    encoding: Encoding,
+}
+
+#[derive(Clone, Copy, Default, Serialize, Deserialize)]
+enum Encoding {
+    #[default]
+    Ogg,
+    Mp3,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -54,6 +66,16 @@ pub struct Manifest {
     pub playlist: Playlist,
     pub tracks: Vec<DownloadedTrack>,
     skipped: usize,
+    #[serde(default = "complete_by_default")]
+    complete: bool,
+    #[serde(default)]
+    total: usize,
+    #[serde(default)]
+    failures: Vec<String>,
+}
+
+fn complete_by_default() -> bool {
+    true
 }
 
 fn root(dirs: &AppDirs, account: &str) -> PathBuf {
@@ -97,10 +119,40 @@ impl Manifest {
     }
 
     pub fn status(&self) -> Status {
+        if !self.complete {
+            if let Some(failure) = self.failures.first() {
+                return Status::Failed(format!(
+                    "{}/{} songs available offline; {} failed. {}. Retry to resume.",
+                    self.tracks.len(),
+                    self.total,
+                    self.failures.len(),
+                    failure
+                ));
+            }
+            return Status::Failed(format!(
+                "Download interrupted: {}/{} songs available offline. Retry to resume.",
+                self.tracks.len(),
+                self.total
+            ));
+        }
         Status::Ready {
             tracks: self.tracks.len(),
             skipped: self.skipped,
         }
+    }
+
+    pub fn available_uris(&self, dirs: &AppDirs) -> Vec<String> {
+        let Ok(dir) = directory(dirs, &self.account, &self.playlist.id) else {
+            return Vec::new();
+        };
+        self.tracks
+            .iter()
+            .filter(|entry| {
+                std::fs::metadata(dir.join(&entry.file))
+                    .is_ok_and(|metadata| metadata.is_file() && metadata.len() == entry.size)
+            })
+            .map(|entry| entry.track.uri.clone())
+            .collect()
     }
 }
 
@@ -110,7 +162,14 @@ pub fn catalog(dirs: &AppDirs, account: &str) -> HashMap<String, Status> {
         for entry in list.flatten() {
             let id = entry.file_name().to_string_lossy().into_owned();
             if let Ok(manifest) = Manifest::read(dirs, account, &id) {
-                entries.insert(id, manifest.status());
+                let status = if manifest.available_uris(dirs).len() == manifest.tracks.len() {
+                    manifest.status()
+                } else {
+                    Status::Failed(
+                        "Some downloaded songs are missing. Retry to restore them.".into(),
+                    )
+                };
+                entries.insert(id, status);
             } else if entry.file_type().is_ok_and(|kind| kind.is_dir())
                 && directory(dirs, account, &id).is_ok()
             {
@@ -135,6 +194,171 @@ fn check(lease: &Lease) -> Result<()> {
     Ok(())
 }
 
+async fn checkpoint(dirs: &AppDirs, lease: &Lease, manifest: &Manifest) -> Result<()> {
+    let dir = directory(dirs, &manifest.account, &manifest.playlist.id)?;
+    let copy = manifest.clone();
+    let lease = lease.clone();
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        check(&lease)?;
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join("playlist.json");
+        let part = dir.join("playlist.json.part");
+        let mut file = std::fs::File::create(&part)?;
+        serde_json::to_writer(&mut file, &copy)?;
+        file.sync_all()?;
+        drop(file);
+        check(&lease)?;
+        crate::util::replace_file(&part, &path)?;
+        Ok(())
+    })
+    .await??;
+    Ok(())
+}
+
+async fn retry<T, F, Fut>(lease: &Lease, mut operation: F) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    for attempt in 0..3 {
+        check(lease)?;
+        match operation().await {
+            Ok(value) => return Ok(value),
+            Err(error) if attempt == 2 || key_refused(&error) => return Err(error),
+            Err(_) => {
+                check(lease)?;
+                tokio::time::sleep(Duration::from_secs(1 << attempt)).await;
+            }
+        }
+    }
+    unreachable!()
+}
+
+fn key_refused(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<librespot_core::Error>()
+            .is_some_and(|error| {
+                matches!(
+                    error.error.downcast_ref::<AudioKeyError>(),
+                    Some(AudioKeyError::AesKey)
+                )
+            })
+    })
+}
+
+// Keep the playback engine's format preference, including its MP3 fallbacks.
+fn formats(bitrate: u16) -> [AudioFileFormat; 7] {
+    use AudioFileFormat::*;
+    match bitrate {
+        96 => [
+            OGG_VORBIS_96,
+            MP3_96,
+            OGG_VORBIS_160,
+            MP3_160,
+            MP3_256,
+            OGG_VORBIS_320,
+            MP3_320,
+        ],
+        160 => [
+            OGG_VORBIS_160,
+            MP3_160,
+            OGG_VORBIS_96,
+            MP3_96,
+            MP3_256,
+            OGG_VORBIS_320,
+            MP3_320,
+        ],
+        _ => [
+            OGG_VORBIS_320,
+            MP3_320,
+            MP3_256,
+            OGG_VORBIS_160,
+            MP3_160,
+            OGG_VORBIS_96,
+            MP3_96,
+        ],
+    }
+}
+
+async fn resolve_audio(session: &Session, uri: SpotifyUri, lease: &Lease) -> Result<AudioItem> {
+    let item = retry(lease, || async {
+        Ok(AudioItem::get_file(session, uri.clone()).await?)
+    })
+    .await?;
+    resolve_available(item, lease, |alternative| async move {
+        retry(lease, || async {
+            Ok(AudioItem::get_file(session, alternative.clone()).await?)
+        })
+        .await
+    })
+    .await
+}
+
+async fn resolve_available<F, Fut>(
+    item: AudioItem,
+    lease: &Lease,
+    mut fetch: F,
+) -> Result<AudioItem>
+where
+    F: FnMut(SpotifyUri) -> Fut,
+    Fut: std::future::Future<Output = Result<AudioItem>>,
+{
+    if let Err(reason) = &item.availability {
+        bail!("Song unavailable: {reason}");
+    }
+    if !item.files.is_empty() {
+        return Ok(item);
+    }
+    if let Some(alternatives) = item.alternatives {
+        for alternative in alternatives.0 {
+            check(lease)?;
+            if let Ok(item) = fetch(alternative).await
+                && item.availability.is_ok()
+                && !item.files.is_empty()
+            {
+                return Ok(item);
+            }
+        }
+    }
+    bail!("Spotify returned no playable audio file or available alternative")
+}
+
+fn verify_audio(path: &Path, entry: &DownloadedTrack) -> Result<()> {
+    let mut file = std::fs::File::open(path)
+        .context("Offline audio is missing; download the playlist again")?;
+    if file.metadata()?.len() != entry.size {
+        bail!("Incomplete offline audio; download the playlist again");
+    }
+    let mut hash = Sha256::new();
+    std::io::copy(&mut file, &mut hash)?;
+    if format!("{:x}", hash.finalize()) != entry.sha256 {
+        bail!("Damaged offline audio; download the playlist again");
+    }
+    Ok(())
+}
+
+fn progress_snapshot(
+    manifest: &Manifest,
+    reusable: &HashMap<String, DownloadedTrack>,
+    order: &[Track],
+) -> Manifest {
+    let mut entries = reusable.clone();
+    for entry in &manifest.tracks {
+        entries.insert(entry.track.uri.clone(), entry.clone());
+    }
+    let mut snapshot = manifest.clone();
+    snapshot.tracks = order
+        .iter()
+        .filter_map(|track| {
+            let mut entry = entries.get(&track.uri)?.clone();
+            entry.track = track.clone();
+            Some(entry)
+        })
+        .collect();
+    snapshot
+}
+
 /// Sequential download, with complete playlist pagination and no plaintext audio on disk.
 pub async fn download(
     dirs: AppDirs,
@@ -143,7 +367,7 @@ pub async fn download(
     playlist: Playlist,
     bitrate: u16,
     lease: Lease,
-    progress: Arc<dyn Fn(Status) + Send + Sync>,
+    progress: Arc<dyn Fn(Status, Vec<String>) + Send + Sync>,
 ) -> Result<Manifest> {
     let dir = directory(&dirs, &account, &playlist.id)?;
     if session.username() != account {
@@ -188,116 +412,236 @@ pub async fn download(
         bail!("This playlist has no downloadable songs");
     }
     let total = tracks.len();
-    let mut saved = Vec::with_capacity(total);
+    let previous = Manifest::read(&dirs, &account, &playlist.id).ok();
+    let mut reusable = HashMap::new();
+    if let Some(previous) = previous {
+        for entry in previous.tracks {
+            check(&lease)?;
+            if !tracks.iter().any(|track| track.uri == entry.track.uri)
+                || reusable.contains_key(&entry.track.uri)
+            {
+                continue;
+            }
+            let path = dir.join(&entry.file);
+            let copy = entry.clone();
+            if tokio::task::spawn_blocking(move || verify_audio(&path, &copy))
+                .await?
+                .is_ok()
+                && lease
+                    .load_audio_key(account.clone(), key_id(&playlist.id, &entry.file))
+                    .await
+                    .is_ok()
+            {
+                reusable.insert(entry.track.uri.clone(), entry);
+            }
+        }
+    }
+    let mut manifest = Manifest {
+        version: 1,
+        account: account.clone(),
+        playlist: playlist.clone(),
+        tracks: Vec::with_capacity(total),
+        skipped: original_count - total,
+        complete: false,
+        total,
+        failures: Vec::new(),
+    };
+    checkpoint(
+        &dirs,
+        &lease,
+        &progress_snapshot(&manifest, &reusable, &tracks),
+    )
+    .await?;
+    let order = tracks.clone();
     let mut unique: HashMap<String, DownloadedTrack> = HashMap::new();
     for track in tracks {
         check(&lease)?;
-        progress(Status::Downloading {
-            done: saved.len(),
-            total,
-        });
+        let snapshot = progress_snapshot(&manifest, &reusable, &order);
+        progress(
+            Status::Downloading {
+                done: snapshot.tracks.len(),
+                total,
+            },
+            snapshot
+                .tracks
+                .iter()
+                .map(|t| t.track.uri.clone())
+                .collect(),
+        );
+        if let Some(existing) = reusable.get(&track.uri) {
+            let mut copy = existing.clone();
+            copy.track = track;
+            unique.insert(copy.track.uri.clone(), copy.clone());
+            manifest.tracks.push(copy);
+            checkpoint(
+                &dirs,
+                &lease,
+                &progress_snapshot(&manifest, &reusable, &order),
+            )
+            .await?;
+            continue;
+        }
         if let Some(existing) = unique.get(&track.uri) {
             let mut copy = existing.clone();
             copy.track = track;
-            saved.push(copy);
+            manifest.tracks.push(copy);
+            checkpoint(
+                &dirs,
+                &lease,
+                &progress_snapshot(&manifest, &reusable, &order),
+            )
+            .await?;
             continue;
         }
-        let uri = SpotifyUri::from_uri(&track.uri)?;
-        let item = AudioItem::get_file(&session, uri.clone()).await?;
-        item.availability
-            .map_err(|e| anyhow::anyhow!("Song unavailable: {e}"))?;
-        let formats = match bitrate {
-            96 => [
-                AudioFileFormat::OGG_VORBIS_96,
-                AudioFileFormat::OGG_VORBIS_160,
-                AudioFileFormat::OGG_VORBIS_320,
-            ],
-            160 => [
-                AudioFileFormat::OGG_VORBIS_160,
-                AudioFileFormat::OGG_VORBIS_320,
-                AudioFileFormat::OGG_VORBIS_96,
-            ],
-            _ => [
-                AudioFileFormat::OGG_VORBIS_320,
-                AudioFileFormat::OGG_VORBIS_160,
-                AudioFileFormat::OGG_VORBIS_96,
-            ],
-        };
-        let file_id = formats
-            .iter()
-            .find_map(|f| item.files.get(f))
-            .copied()
-            .context("This song has no supported offline audio format")?;
-        let track_id = (&uri).try_into()?;
-        let key = session.audio_key().request(track_id, file_id).await?;
-        let audio = AudioFile::open(&session, file_id, 40_000).await?;
-        let file = file_id.to_string();
-        let out = dir.join(&file);
-        let io_lease = lease.clone();
-        let (size, sha256) = tokio::task::spawn_blocking(move || -> Result<_> {
-            std::fs::create_dir_all(out.parent().context("Missing download directory")?)?;
-            let part = out.with_extension("part");
-            let result = (|| {
-                let mut audio = audio;
-                let mut dest = std::fs::File::create(&part)?;
-                let mut hash = Sha256::new();
-                let mut size = 0u64;
-                let mut buffer = [0u8; 64 * 1024];
-                loop {
-                    check(&io_lease)?;
-                    let n = audio.read(&mut buffer)?;
-                    if n == 0 {
-                        break;
+        let result: Result<(DownloadedTrack, [u8; 16])> = async {
+            let uri = SpotifyUri::from_uri(&track.uri)?;
+            let item = resolve_audio(&session, uri.clone(), &lease).await?;
+            let (format, file_id) = formats(bitrate)
+                .iter()
+                .find_map(|format| item.files.get(format).map(|file| (*format, *file)))
+                .context("Spotify returned no Ogg or MP3 audio file supported by playback")?;
+            let encoding = if matches!(
+                format,
+                AudioFileFormat::OGG_VORBIS_96
+                    | AudioFileFormat::OGG_VORBIS_160
+                    | AudioFileFormat::OGG_VORBIS_320
+            ) {
+                Encoding::Ogg
+            } else {
+                Encoding::Mp3
+            };
+            // librespot requests the key with the original track ID, even for an alternative.
+            let track_id = (&uri).try_into()?;
+            let key = retry(&lease, || async {
+                Ok(session.audio_key().request(track_id, file_id).await?)
+            })
+            .await
+            .with_context(|| {
+                format!(
+                    "Unable to authorize '{}'. Retry to resume the download",
+                    track.name
+                )
+            })?;
+            let file = file_id.to_string();
+            let out = dir.join(&file);
+            let (size, sha256) = retry(&lease, || async {
+                let audio = AudioFile::open(&session, file_id, 40_000).await?;
+                let io_lease = lease.clone();
+                let out = out.clone();
+                let (size, sha256) = tokio::task::spawn_blocking(move || -> Result<_> {
+                    std::fs::create_dir_all(out.parent().context("Missing download directory")?)?;
+                    let part = out.with_extension("part");
+                    let result = (|| {
+                        let mut audio = audio;
+                        let controller = audio.get_stream_loader_controller()?;
+                        controller.set_random_access_mode();
+                        // Request the complete file, rather than a playback-sized read-ahead window.
+                        controller.fetch_next_and_wait(controller.len(), 0)?;
+                        let mut dest = std::fs::File::create(&part)?;
+                        let mut hash = Sha256::new();
+                        let mut size = 0u64;
+                        let mut buffer = [0u8; 64 * 1024];
+                        loop {
+                            check(&io_lease)?;
+                            // Re-request a stalled range instead of leaving it pending forever.
+                            controller.fetch_next_and_wait(
+                                buffer.len(),
+                                buffer
+                                    .len()
+                                    .min(controller.len().saturating_sub(size as usize)),
+                            )?;
+                            let n = audio.read(&mut buffer)?;
+                            if n == 0 {
+                                break;
+                            }
+                            dest.write_all(&buffer[..n])?;
+                            hash.update(&buffer[..n]);
+                            size += n as u64;
+                        }
+                        dest.sync_all()?;
+                        drop(dest);
+                        check(&io_lease)?;
+                        crate::util::replace_file(&part, &out)?;
+                        Ok((size, format!("{:x}", hash.finalize())))
+                    })();
+                    if result.is_err() {
+                        let _ = std::fs::remove_file(&part);
                     }
-                    dest.write_all(&buffer[..n])?;
-                    hash.update(&buffer[..n]);
-                    size += n as u64;
+                    result
+                })
+                .await??;
+                Ok((size, sha256))
+            })
+            .await
+            .with_context(|| {
+                format!(
+                    "Unable to download '{}'. Retry to resume; completed songs are saved",
+                    track.name
+                )
+            })?;
+            let validate_path = out.clone();
+            tokio::task::spawn_blocking(move || -> Result<()> {
+                let (mut decoder, _) = decode(&validate_path, key.0, false, encoding)?;
+                if decoder.next_packet()?.is_none() {
+                    bail!("Downloaded audio has no playable samples");
                 }
-                dest.sync_all()?;
-                drop(dest);
-                check(&io_lease)?;
-                crate::util::replace_file(&part, &out)?;
-                Ok((size, format!("{:x}", hash.finalize())))
-            })();
-            if result.is_err() {
-                let _ = std::fs::remove_file(&part);
+                Ok(())
+            })
+            .await??;
+            Ok((
+                DownloadedTrack {
+                    track: track.clone(),
+                    file,
+                    size,
+                    sha256,
+                    encoding,
+                },
+                key.0,
+            ))
+        }
+        .await;
+        let (entry, key) = match result {
+            Ok(entry) => entry,
+            Err(error) => {
+                check(&lease)?;
+                manifest
+                    .failures
+                    .push(format!("'{}': {error:#}", track.name));
+                checkpoint(
+                    &dirs,
+                    &lease,
+                    &progress_snapshot(&manifest, &reusable, &order),
+                )
+                .await?;
+                continue;
             }
-            result
-        })
-        .await??;
-        lease
-            .save_audio_key(account.clone(), key_id(&playlist.id, &file), key.0)
-            .await?;
-        let entry = DownloadedTrack {
-            track,
-            file,
-            size,
-            sha256,
         };
+        // Credential-store failures are global errors, not an unavailable song.
+        lease
+            .save_audio_key(account.clone(), key_id(&playlist.id, &entry.file), key)
+            .await?;
         unique.insert(entry.track.uri.clone(), entry.clone());
-        saved.push(entry);
+        manifest.tracks.push(entry);
+        checkpoint(
+            &dirs,
+            &lease,
+            &progress_snapshot(&manifest, &reusable, &order),
+        )
+        .await?;
     }
-    let manifest = Manifest {
-        version: 1,
-        account,
-        playlist,
-        skipped: original_count - total,
-        tracks: saved,
-    };
-    let copy = manifest.clone();
-    tokio::task::spawn_blocking(move || -> Result<()> {
-        check(&lease)?;
-        let path = dir.join("playlist.json");
-        let part = dir.join("playlist.json.part");
-        let mut file = std::fs::File::create(&part)?;
-        serde_json::to_writer(&mut file, &copy)?;
-        file.sync_all()?;
-        drop(file);
-        check(&lease)?;
-        crate::util::replace_file(&part, &path)?;
-        Ok(())
-    })
-    .await??;
+    manifest.complete = manifest.failures.is_empty();
+    checkpoint(&dirs, &lease, &manifest).await?;
+    progress(
+        Status::Downloading {
+            done: manifest.tracks.len(),
+            total,
+        },
+        manifest
+            .tracks
+            .iter()
+            .map(|t| t.track.uri.clone())
+            .collect(),
+    );
     Ok(manifest)
 }
 
@@ -398,16 +742,7 @@ pub async fn prepare(dirs: AppDirs, account: String, id: String, lease: Lease) -
             if !verified.insert(path.clone()) {
                 continue;
             }
-            let mut file = std::fs::File::open(path)
-                .context("Offline audio is missing; download the playlist again")?;
-            if file.metadata()?.len() != entry.size {
-                bail!("Incomplete offline audio; download the playlist again");
-            }
-            let mut hash = Sha256::new();
-            std::io::copy(&mut file, &mut hash)?;
-            if format!("{:x}", hash.finalize()) != entry.sha256 {
-                bail!("Damaged offline audio; download the playlist again");
-            }
+            verify_audio(path, entry)?;
         }
         Ok(prepared)
     })
@@ -418,6 +753,7 @@ pub async fn prepare(dirs: AppDirs, account: String, id: String, lease: Lease) -
 struct Source {
     audio: AudioDecrypt<std::fs::File>,
     size: u64,
+    offset: u64,
 }
 impl Read for Source {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
@@ -427,13 +763,13 @@ impl Read for Source {
 impl Seek for Source {
     fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
         let absolute = match pos {
-            SeekFrom::Start(n) => 167u64.checked_add(n),
-            SeekFrom::End(n) => (self.size + 167).checked_add_signed(n),
+            SeekFrom::Start(n) => self.offset.checked_add(n),
+            SeekFrom::End(n) => (self.size + self.offset).checked_add_signed(n),
             SeekFrom::Current(n) => self.audio.stream_position()?.checked_add_signed(n),
         }
-        .filter(|n| *n >= 167)
+        .filter(|n| *n >= self.offset)
         .ok_or_else(|| std::io::Error::other("Invalid audio seek"))?;
-        Ok(self.audio.seek(SeekFrom::Start(absolute))? - 167)
+        Ok(self.audio.seek(SeekFrom::Start(absolute))? - self.offset)
     }
 }
 impl MediaSource for Source {
@@ -445,17 +781,35 @@ impl MediaSource for Source {
     }
 }
 
+#[cfg(test)]
 fn decoder(path: &Path, key: [u8; 16], normalise: bool) -> Result<(SymphoniaDecoder, f64)> {
+    decode(path, key, normalise, Encoding::Ogg)
+}
+
+fn decode(
+    path: &Path,
+    key: [u8; 16],
+    normalise: bool,
+    encoding: Encoding,
+) -> Result<(SymphoniaDecoder, f64)> {
+    let offset = match encoding {
+        Encoding::Ogg => 167,
+        Encoding::Mp3 => 0,
+    };
     let file = std::fs::File::open(path)?;
     let size = file
         .metadata()?
         .len()
-        .checked_sub(167)
+        .checked_sub(offset)
         .context("Invalid offline audio")?;
     let mut audio = AudioDecrypt::new(Some(AudioKey(key)), file);
-    audio.seek(SeekFrom::Start(144))?;
+    if matches!(encoding, Encoding::Ogg) {
+        audio.seek(SeekFrom::Start(144))?;
+    }
     let mut gain_peak = [0u8; 8];
-    audio.read_exact(&mut gain_peak)?;
+    if matches!(encoding, Encoding::Ogg) {
+        audio.read_exact(&mut gain_peak)?;
+    }
     let gain = f64::from(f32::from_le_bytes(gain_peak[..4].try_into()?));
     let peak = f64::from(f32::from_le_bytes(gain_peak[4..].try_into()?));
     let factor = if normalise && gain.is_finite() && peak.is_finite() && peak > 0.0 {
@@ -463,10 +817,23 @@ fn decoder(path: &Path, key: [u8; 16], normalise: bool) -> Result<(SymphoniaDeco
     } else {
         1.0
     };
-    audio.seek(SeekFrom::Start(167))?;
+    audio.seek(SeekFrom::Start(offset))?;
     let mut hint = Hint::new();
-    hint.with_extension("ogg");
-    Ok((SymphoniaDecoder::new(Source { audio, size }, hint)?, factor))
+    hint.with_extension(match encoding {
+        Encoding::Ogg => "ogg",
+        Encoding::Mp3 => "mp3",
+    });
+    Ok((
+        SymphoniaDecoder::new(
+            Source {
+                audio,
+                size,
+                offset,
+            },
+            hint,
+        )?,
+        factor,
+    ))
 }
 
 #[derive(Default)]
@@ -555,9 +922,17 @@ impl OfflinePlayer {
             PlayerCommand::Transfer => false,
             PlayerCommand::Load(spec) => {
                 spec.context_uri.as_deref() == Some(self.playlist_uri.as_str())
+                    || spec
+                        .context_uri
+                        .as_ref()
+                        .is_some_and(|uri| self.uris.contains(uri))
                     || (spec.context_uri.is_none()
                         && !spec.uris.is_empty()
-                        && spec.uris.iter().all(|u| self.uris.contains(u)))
+                        && spec
+                            .offset_uri
+                            .as_ref()
+                            .or_else(|| spec.uris.get(spec.offset_index.unwrap_or(0) as usize))
+                            .is_some_and(|uri| self.uris.contains(uri)))
             }
             _ => true,
         }
@@ -670,7 +1045,20 @@ fn run(
             s.error = None;
             match command {
                 PlayerCommand::Load(spec) => {
-                    let list: Vec<usize> = if spec.uris.is_empty() {
+                    let list: Vec<usize> = if let Some(uri) = spec
+                        .context_uri
+                        .as_ref()
+                        .filter(|uri| uri.starts_with("spotify:track:"))
+                    {
+                        prepared
+                            .manifest
+                            .tracks
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(index, track)| (&track.track.uri == uri).then_some(index))
+                            .take(1)
+                            .collect()
+                    } else if spec.uris.is_empty() {
                         (0..prepared.context_len).collect()
                     } else {
                         spec.uris
@@ -684,16 +1072,23 @@ fn run(
                             })
                             .collect()
                     };
-                    let start = spec
-                        .offset_index
-                        .map(|n| n as usize)
-                        .or_else(|| {
-                            spec.offset_uri.as_ref().and_then(|u| {
-                                list.iter()
-                                    .position(|i| &prepared.manifest.tracks[*i].track.uri == u)
+                    let start = if let Some(uri) = &spec.offset_uri {
+                        spec.offset_index
+                            .map(|index| index as usize)
+                            .filter(|index| {
+                                list.get(*index).is_some_and(|index| {
+                                    &prepared.manifest.tracks[*index].track.uri == uri
+                                })
                             })
-                        })
-                        .unwrap_or(0);
+                            .or_else(|| {
+                                list.iter().position(|index| {
+                                    &prepared.manifest.tracks[*index].track.uri == uri
+                                })
+                            })
+                            .context("The requested song is not downloaded")?
+                    } else {
+                        spec.offset_index.map(|n| n as usize).unwrap_or(0)
+                    };
                     if start >= list.len() {
                         bail!("The requested song is not downloaded");
                     }
@@ -788,7 +1183,12 @@ fn run(
             audio.interrupt();
             sink.stop()?;
             let (path, key) = &prepared.sources[index];
-            let (mut next, factor) = decoder(path, *key, config.normalisation)?;
+            let (mut next, factor) = decode(
+                path,
+                *key,
+                config.normalisation,
+                prepared.manifest.tracks[index].encoding,
+            )?;
             let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
             if s.position_ms != 0 {
                 s.position_ms = next.seek(s.position_ms)?;
@@ -877,8 +1277,12 @@ fn run(
                     if let Some(index) = order.next(s.repeat, true) {
                         let uri = prepared.manifest.tracks[index].track.uri.clone();
                         let (path, key) = &prepared.sources[index];
-                        let (next, factor) =
-                            crate::offline::decoder(path, *key, config.normalisation)?;
+                        let (next, factor) = crate::offline::decode(
+                            path,
+                            *key,
+                            config.normalisation,
+                            prepared.manifest.tracks[index].encoding,
+                        )?;
                         current_decoder = Some(next);
                         gain = factor;
                         normalisation.store(factor.to_bits(), Ordering::Relaxed);
@@ -920,6 +1324,199 @@ fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn empty_original_files_resolve_an_available_alternative() {
+        let (dirs, _, _, _) = fixture();
+        let store = crate::credentials::Store::in_memory(dirs.clone());
+        let lease = store.lease(crate::credentials::Slot::Playback);
+        let uri = SpotifyUri::from_uri("spotify:track:2SaWT781xr3hHLdbVt5DB7").unwrap();
+        let item = AudioItem {
+            track_id: uri.clone(),
+            uri: uri.to_uri().unwrap(),
+            files: Default::default(),
+            name: "test".into(),
+            covers: vec![],
+            language: vec![],
+            duration_ms: 500,
+            is_explicit: false,
+            availability: Ok(()),
+            alternatives: Some(librespot_metadata::track::Tracks(vec![uri.clone(), uri])),
+            unique_fields: librespot_metadata::audio::item::UniqueFields::Local {
+                artists: None,
+                album: None,
+                album_artists: None,
+                number: None,
+                disc_number: None,
+                path: PathBuf::new(),
+            },
+        };
+        let mut available = item.clone();
+        available
+            .files
+            .insert(AudioFileFormat::MP3_160, librespot_core::FileId([1; 20]));
+        available.alternatives = None;
+        let mut calls = 0;
+        let resolved = resolve_available(item, &lease, |_| {
+            calls += 1;
+            std::future::ready(if calls == 1 {
+                Err(anyhow::anyhow!("unavailable alternative"))
+            } else {
+                Ok(available.clone())
+            })
+        })
+        .await
+        .unwrap();
+        assert_eq!(calls, 2);
+        assert!(resolved.files.contains_key(&AudioFileFormat::MP3_160));
+        std::fs::remove_dir_all(dirs.state.parent().unwrap()).unwrap();
+    }
+    #[test]
+    fn format_fallbacks_match_playback_and_old_manifests_default_to_ogg() {
+        assert_eq!(formats(320)[1], AudioFileFormat::MP3_320);
+        assert_eq!(formats(160)[1], AudioFileFormat::MP3_160);
+        assert_eq!(formats(96)[1], AudioFileFormat::MP3_96);
+        let (dirs, manifest, _, _) = fixture();
+        let mut json = serde_json::to_value(&manifest).unwrap();
+        json["tracks"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("encoding");
+        json.as_object_mut().unwrap().remove("failures");
+        let old: Manifest = serde_json::from_value(json).unwrap();
+        assert!(matches!(old.tracks[0].encoding, Encoding::Ogg));
+        assert_eq!(old.status(), manifest.status());
+        std::fs::remove_dir_all(dirs.state.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn encrypted_mp3_decodes_and_seeks_without_a_spotify_header() {
+        let (dirs, _, path, key) = fixture();
+        let mut encrypted = Vec::new();
+        AudioDecrypt::new(
+            Some(AudioKey(key)),
+            std::io::Cursor::new(include_bytes!("../tests/fixtures/offline-tone.mp3")),
+        )
+        .read_to_end(&mut encrypted)
+        .unwrap();
+        std::fs::write(&path, encrypted).unwrap();
+        let (mut decoder, factor) = decode(&path, key, true, Encoding::Mp3).unwrap();
+        assert_eq!(factor, 1.0);
+        assert!(decoder.next_packet().unwrap().is_some());
+        decoder.seek(100).unwrap();
+        assert!(decoder.next_packet().unwrap().is_some());
+        std::fs::remove_dir_all(dirs.state.parent().unwrap()).unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn spotify_key_refusal_is_not_retried_as_a_timeout() {
+        let (dirs, _, _, _) = fixture();
+        let store = crate::credentials::Store::in_memory(dirs.clone());
+        let lease = store.lease(crate::credentials::Slot::Playback);
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let result: Result<()> = retry(&lease, || async {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Err(
+                anyhow::Error::new(librespot_core::Error::unavailable(AudioKeyError::AesKey))
+                    .context("song authorization"),
+            )
+        })
+        .await;
+        assert!(result.is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        std::fs::remove_dir_all(dirs.state.parent().unwrap()).unwrap();
+    }
+    #[tokio::test(start_paused = true)]
+    async fn stalled_audio_retries_then_succeeds_and_permanent_failure_is_bounded() {
+        let (dirs, _, _, _) = fixture();
+        let store = crate::credentials::Store::in_memory(dirs.clone());
+        let lease = store.lease(crate::credentials::Slot::Playback);
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let result = retry(&lease, || async {
+            if calls.fetch_add(1, Ordering::SeqCst) < 2 {
+                return Err(
+                    std::io::Error::new(std::io::ErrorKind::TimedOut, "stalled range").into(),
+                );
+            }
+            Ok(42)
+        })
+        .await
+        .unwrap();
+        assert_eq!(result, 42);
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        calls.store(0, Ordering::SeqCst);
+        let result: Result<()> = retry(&lease, || async {
+            calls.fetch_add(1, Ordering::SeqCst);
+            bail!("unavailable")
+        })
+        .await;
+        assert!(result.is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        store.invalidate(crate::credentials::Slot::Playback);
+        let result = retry(&lease, || async {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
+        .await;
+        assert!(result.is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        std::fs::remove_dir_all(dirs.state.parent().unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn ten_completed_tracks_survive_interruption_and_remain_playable_after_restart() {
+        let (dirs, mut manifest, _, key) = fixture();
+        let store = crate::credentials::Store::in_memory(dirs.clone());
+        let lease = store.lease(crate::credentials::Slot::Playback);
+        lease
+            .save_audio_key("alice".into(), key_id("mix", &manifest.tracks[0].file), key)
+            .await
+            .unwrap();
+        manifest.tracks = vec![manifest.tracks[0].clone(); 10];
+        manifest.complete = false;
+        manifest.total = 108;
+        checkpoint(&dirs, &lease, &manifest).await.unwrap();
+        let loaded = Manifest::read(&dirs, "alice", "mix").unwrap();
+        assert_eq!(loaded.tracks.len(), 10);
+        assert!(matches!(loaded.status(), Status::Failed(_)));
+        assert_eq!(
+            prepare(dirs.clone(), "alice".into(), "mix".into(), lease.clone())
+                .await
+                .unwrap()
+                .context_len,
+            10
+        );
+        let mut in_progress = loaded.clone();
+        in_progress.tracks.clear();
+        let reusable = loaded
+            .tracks
+            .iter()
+            .map(|entry| (entry.track.uri.clone(), entry.clone()))
+            .collect();
+        let order: Vec<_> = loaded
+            .tracks
+            .iter()
+            .map(|entry| entry.track.clone())
+            .collect();
+        let resumed = progress_snapshot(&in_progress, &reusable, &order);
+        checkpoint(&dirs, &lease, &resumed).await.unwrap();
+        assert_eq!(
+            Manifest::read(&dirs, "alice", "mix").unwrap().tracks.len(),
+            10,
+            "retrying before the next successful track must preserve all completed occurrences"
+        );
+        remove(dirs.clone(), "alice".into(), "mix".into(), lease.clone())
+            .await
+            .unwrap();
+        assert!(Manifest::read(&dirs, "alice", "mix").is_err());
+        assert!(
+            lease
+                .load_audio_key("alice".into(), key_id("mix", &loaded.tracks[0].file))
+                .await
+                .is_err()
+        );
+        std::fs::remove_dir_all(dirs.state.parent().unwrap()).unwrap();
+    }
+
     fn fixture() -> (AppDirs, Manifest, PathBuf, [u8; 16]) {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let base = std::env::current_dir()
@@ -964,10 +1561,14 @@ mod tests {
                     ..Default::default()
                 },
                 file,
+                encoding: Encoding::Ogg,
                 size: encrypted.len() as u64,
                 sha256: format!("{:x}", Sha256::digest(&encrypted)),
             }],
             skipped: 0,
+            complete: true,
+            total: 1,
+            failures: Vec::new(),
         };
         std::fs::write(
             dir.join("playlist.json"),

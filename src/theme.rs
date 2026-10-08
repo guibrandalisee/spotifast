@@ -8,6 +8,16 @@ use crate::i18n::{Locale, gettext};
 use egui::{Color32, CornerRadius, Response, Sense, Stroke, Vec2};
 use std::borrow::Cow;
 
+/// A completed local download, matching Spotify's download status symbol.
+pub const OFFLINE_COLOR: Color32 = Color32::from_rgb(30, 185, 84);
+
+pub fn offline_badge(ui: &mut egui::Ui, locale: Locale, size: f32) {
+    let label = gettext(locale, "Available offline");
+    let response = icon(ui, Icon::Downloaded, size, OFFLINE_COLOR);
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Image, true, &label));
+    response.on_hover_text(label);
+}
+
 /// A palette file from the themes directory.
 pub type CustomTheme = fastframe_theme::CustomTheme<Palette>;
 /// The palette files, and the Omarchy palette where the desktop has one.
@@ -408,6 +418,7 @@ fastframe_icons::icons! {
         Compass => "compass",
         Copy => lucide "copy",
         Download => "download",
+        Downloaded => "downloaded",
         Disc => "disc-3",
         Ellipsis => lucide "ellipsis",
         Expand => "expand",
