@@ -10,8 +10,12 @@ In this personal fork, offline playlist downloads request complete audio files
 through librespot's loader in random-access mode, instead of relying on playback
 read-ahead. Transient metadata, audio-key and file-transfer failures have up to
 three attempts with bounded backoff. Explicit Spotify audio-key refusals are not
-retried as timeouts. A song failure is recorded and the next song proceeds.
-Metadata alternatives and Ogg/MP3 format preferences follow librespot playback. Each completed track checkpoints the playlist
+retried as timeouts. They pause the download and preserve completed audio,
+because the response cannot reliably distinguish a track refusal from session
+throttling. A later explicit retry resumes from saved audio. Other song failures
+are recorded and the next song proceeds.
+Metadata alternatives and Ogg/MP3 format preferences follow librespot playback.
+Each completed track checkpoints the playlist
 manifest atomically. Partial manifests retain reusable tracks, remain playable,
 and cannot mark a playlist complete. A retry verifies ciphertext size, checksum
 and protected-key availability before reusing a completed song.

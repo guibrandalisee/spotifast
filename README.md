@@ -51,8 +51,10 @@ can be resumed with **Retry download**. Completed songs remain playable even if
 the rest of the playlist fails; the playlist is not marked fully available until
 all supported songs finish. Resuming checks saved audio before reusing it.
 Downloads resolve available Spotify alternatives and accept the Ogg/MP3 formats
-supported by librespot. A failed song does not stop the remaining songs.
-Explicit audio-key refusals are reported instead of retried as network timeouts.
+supported by librespot. An unavailable format or failed transfer does not stop
+the remaining songs.
+A refused audio key pauses the download to avoid more requests against a
+possibly throttled session. A later explicit retry reuses completed audio.
 
 This is a personal implementation, independent of the official Spotify app's
 downloads. It does not import official download files, synchronize offline

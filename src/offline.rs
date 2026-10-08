@@ -359,6 +359,31 @@ fn progress_snapshot(
     snapshot
 }
 
+// A refusal can also represent session throttling. Persist progress and stop
+// requesting more keys until an explicit retry; other song failures may proceed.
+async fn save_download_failure(
+    dirs: &AppDirs,
+    lease: &Lease,
+    manifest: &mut Manifest,
+    track: &Track,
+    error: &anyhow::Error,
+    reusable: &HashMap<String, DownloadedTrack>,
+    order: &[Track],
+) -> Result<Option<Manifest>> {
+    let paused = key_refused(error);
+    manifest.failures.push(if paused {
+        format!(
+            "Spotify refused the audio key for '{}'; download paused. Try again later",
+            track.name
+        )
+    } else {
+        format!("'{}': {error:#}", track.name)
+    });
+    let snapshot = progress_snapshot(manifest, reusable, order);
+    checkpoint(dirs, lease, &snapshot).await?;
+    Ok(paused.then_some(snapshot))
+}
+
 /// Sequential download, with complete playlist pagination and no plaintext audio on disk.
 pub async fn download(
     dirs: AppDirs,
@@ -604,15 +629,19 @@ pub async fn download(
             Ok(entry) => entry,
             Err(error) => {
                 check(&lease)?;
-                manifest
-                    .failures
-                    .push(format!("'{}': {error:#}", track.name));
-                checkpoint(
+                if let Some(snapshot) = save_download_failure(
                     &dirs,
                     &lease,
-                    &progress_snapshot(&manifest, &reusable, &order),
+                    &mut manifest,
+                    &track,
+                    &error,
+                    &reusable,
+                    &order,
                 )
-                .await?;
+                .await?
+                {
+                    return Ok(snapshot);
+                }
                 continue;
             }
         };
@@ -1370,6 +1399,82 @@ mod tests {
         assert!(resolved.files.contains_key(&AudioFileFormat::MP3_160));
         std::fs::remove_dir_all(dirs.state.parent().unwrap()).unwrap();
     }
+    #[tokio::test]
+    async fn refused_key_pauses_without_losing_66_saved_songs_and_transfer_failure_can_proceed() {
+        let (dirs, mut manifest, _, _) = fixture();
+        let store = crate::credentials::Store::in_memory(dirs.clone());
+        let lease = store.lease(crate::credentials::Slot::Playback);
+        let saved = manifest.tracks[0].clone();
+        let order: Vec<_> = (0..108)
+            .map(|index| Track {
+                uri: format!("spotify:track:song{index}"),
+                ..saved.track.clone()
+            })
+            .collect();
+        let reusable: HashMap<_, _> = order[..66]
+            .iter()
+            .map(|track| {
+                let mut entry = saved.clone();
+                entry.track = track.clone();
+                (track.uri.clone(), entry)
+            })
+            .collect();
+        manifest.tracks.clear();
+        manifest.complete = false;
+        manifest.total = 108;
+        let track = Track {
+            name: "Snow (Hey Oh)".into(),
+            ..order[66].clone()
+        };
+        let error = anyhow::Error::new(librespot_core::Error::unavailable(AudioKeyError::AesKey))
+            .context("Unable to authorize song");
+        let paused = save_download_failure(
+            &dirs,
+            &lease,
+            &mut manifest,
+            &track,
+            &error,
+            &reusable,
+            &order,
+        )
+        .await
+        .unwrap()
+        .expect("Key refusal must stop further key requests");
+        assert_eq!(paused.tracks.len(), 66);
+        let loaded = Manifest::read(&dirs, "alice", "mix").unwrap();
+        assert_eq!(loaded.tracks.len(), 66);
+        let Status::Failed(message) = loaded.status() else {
+            panic!("Partial playlist cannot be ready")
+        };
+        assert!(message.contains("66/108"));
+        assert!(message.contains("Snow (Hey Oh)"));
+        assert!(message.contains("paused"));
+        let error = anyhow::Error::new(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "stalled transfer",
+        ));
+        assert!(
+            save_download_failure(
+                &dirs,
+                &lease,
+                &mut manifest,
+                &track,
+                &error,
+                &reusable,
+                &order
+            )
+            .await
+            .unwrap()
+            .is_none(),
+            "An individual transfer failure must allow the next song"
+        );
+        assert_eq!(
+            Manifest::read(&dirs, "alice", "mix").unwrap().tracks.len(),
+            66
+        );
+        std::fs::remove_dir_all(dirs.state.parent().unwrap()).unwrap();
+    }
+
     #[test]
     fn format_fallbacks_match_playback_and_old_manifests_default_to_ogg() {
         assert_eq!(formats(320)[1], AudioFileFormat::MP3_320);
