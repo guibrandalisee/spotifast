@@ -3,6 +3,11 @@
 Follow `CONTRIBUTING.md`; it is the canonical product and contribution policy.
 These instructions add implementation constraints for coding agents.
 
+Personal-fork exception authorized by the owner on 2026-10-08: playlist-only
+offline downloads and protected persistence of streaming audio keys are in
+scope here. This exception does not apply to the upstream repository. All pushes
+must go to `https://github.com/guibrandalisee/spotifast`, never `crmne/spotifast`.
+
 ## Product boundaries
 
 - Keep Spotifast a small native Spotify client. Do not add a browser engine,

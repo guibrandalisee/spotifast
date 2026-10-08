@@ -757,6 +757,26 @@ pub fn apply_flags(app: &mut App, page: Option<&str>, show: Option<&str>) {
     }
     for surface in show.unwrap_or("").split(',').map(str::trim) {
         match surface {
+            "offline-download" => {
+                app.downloads.insert(
+                    "pl1".into(),
+                    crate::offline::Status::Ready {
+                        tracks: 30,
+                        skipped: 0,
+                    },
+                );
+                app.open(Page::Playlist("pl1".into()));
+            }
+            "offline-downloading" => {
+                app.downloads.insert(
+                    "pl1".into(),
+                    crate::offline::Status::Downloading {
+                        done: 12,
+                        total: 30,
+                    },
+                );
+                app.open(Page::Playlist("pl1".into()));
+            }
             "library-list"
             | "library-list-narrow"
             | "library-list-wide"

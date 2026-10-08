@@ -320,6 +320,29 @@ uses the Web API for subsequent control requests.
 
 ## The engine
 
+This personal fork also has an explicitly selected offline playlist player.
+Downloading first reads all playlist pages through the active librespot session,
+then requests each supported song's audio metadata, encrypted audio and audio key
+sequentially. Ciphertext and a complete playlist snapshot are saved atomically
+under `state/downloads/`, separated by account and playlist. Keys are retained
+only in the platform credential store, with the same worker and sign-out
+generation guards as playback credentials. No key or plaintext audio is written
+to JSON or logs. Repeated songs remain repeated in playback order.
+
+**Play offline** loads local metadata and protected keys, verifies audio size
+and SHA-256, and starts a local decoder without authenticating a Spotify session
+or registering a Connect device. It uses the normal output, EQ, visualizers and
+volume path. Connect playback is stopped when offline playback starts. Offline
+queue reads are answered locally, and delayed Spotify playback responses cannot
+replace the displayed local state. Offline listens are not sent to Spotify.
+
+Downloads do not implement the official Spotify offline-license protocol or its
+renewal rules. They require the original account's retained sign-in state and an
+accessible credential store. Sign-out invalidates in-flight downloads and stops
+offline playback; returning to the same account can use its retained downloads.
+Removing a download deletes its playlist audio and keys without touching the
+ordinary librespot cache.
+
 Playback runs on a separate runtime. Librespot maintains the Spotify Connect
 session, exposes this computer as a device, receives transfers, and reports
 playback state. If the session drops, it reconnects with the stored credential.

@@ -312,6 +312,8 @@ pub struct App {
     pub offline_library: Option<crate::offline_library::Cache>,
     pub offline_playlist_id: Option<String>,
     pub offline_playlist: Option<PlaylistCache>,
+    pub downloads: std::collections::HashMap<String, crate::offline::Status>,
+    pub offline_playing: bool,
     pub local_device_id: Option<String>,
     /// Ignore the previous local song until a Connect transfer reports its track.
     local_transfer_sequence: Option<u64>,
@@ -806,6 +808,8 @@ impl App {
             offline_library: None,
             offline_playlist_id: None,
             offline_playlist: None,
+            downloads: std::collections::HashMap::new(),
+            offline_playing: false,
             local_device_id: None,
             local_transfer_sequence: None,
             local_ready: false,
@@ -1958,6 +1962,68 @@ impl App {
                 continue;
             }
             match event {
+                Event::Downloads { account, entries } => {
+                    if self.user_id() == Some(account.as_str()) {
+                        for (id, status) in entries {
+                            self.downloads.entry(id).or_insert(status);
+                        }
+                    }
+                }
+                Event::DownloadStatus {
+                    account,
+                    id,
+                    status,
+                } => {
+                    if self.user_id() == Some(account.as_str()) {
+                        if let Some(status) = status {
+                            match &status {
+                                crate::offline::Status::Ready { tracks, skipped } => {
+                                    self.toast(format!(
+                                        "{} ({tracks}; {}: {skipped})",
+                                        gettext(self.locale, "Download complete"),
+                                        gettext(self.locale, "Unavailable")
+                                    ))
+                                }
+                                crate::offline::Status::Failed(error) => {
+                                    self.toast_error(format!("Download: {error}"))
+                                }
+                                _ => {}
+                            }
+                            self.downloads.insert(id, status);
+                        } else {
+                            self.downloads.remove(&id);
+                        }
+                    }
+                }
+                Event::OfflineStarted(playlist) => {
+                    self.offline_playing = true;
+                    self.local_ready = true;
+                    self.local.connected = true;
+                    self.local_device_id = Some(format!("offline-{}", playlist.id));
+                    self.selected_device = self.local_device_id.clone();
+                    self.local_playback = LocalPlayback::Ready {
+                        device_id: self.local_device_id.clone().unwrap_or_default(),
+                    };
+                    self.queued_play = None;
+                    self.queue_seq += 1;
+                    self.queue = Loadable::NotLoaded;
+                    self.queue_fetched_at = None;
+                    self.remote_poll_seq += 1;
+                    self.remote_poll_pending = false;
+                    self.play_request(
+                        PlayRequest::context(playlist.uri).starting_at_index(0),
+                        false,
+                    );
+                }
+                Event::OfflineStopped => {
+                    self.offline_playing = false;
+                    self.local_ready = false;
+                    self.local.connected = false;
+                    self.local.playback = Playback::Paused;
+                    self.local.position_at = None;
+                    self.local_playback = LocalPlayback::Unavailable;
+                    self.clear_play_pending();
+                }
                 Event::PlaylistCoverChecked {
                     id,
                     request,
@@ -1980,6 +2046,9 @@ impl App {
                     {
                         self.offline_library = Some(cache);
                         self.hydrate_saved_library();
+                        if let Some(account) = self.user_id().map(str::to_owned) {
+                            self.backend.send(Command::ReadDownloads { account });
+                        }
                         let selected = match self.page() {
                             Page::Playlist(id)
                                 if self.offline_library.as_ref().is_some_and(|library| {
@@ -2210,8 +2279,13 @@ impl App {
         match &status {
             AuthStatus::Connected { .. } => {
                 self.sign_in_url = None;
-                self.reset_data();
+                if !self.offline_playing {
+                    self.reset_data();
+                }
                 self.hydrate_saved_library();
+                if let Some(account) = self.user_id().map(str::to_owned) {
+                    self.backend.send(Command::ReadDownloads { account });
+                }
                 self.load_playlists();
                 self.ensure_loaded(self.page().clone());
                 self.poll_remote(true);
@@ -2228,6 +2302,8 @@ impl App {
                 self.offline_library = None;
                 self.offline_playlist_id = None;
                 self.offline_playlist = None;
+                self.downloads.clear();
+                self.offline_playing = false;
                 self.premium_notice_shown = false;
                 self.local = LocalState::default();
                 self.local_ready = false;
@@ -4426,7 +4502,7 @@ impl App {
     }
 
     fn poll_remote(&mut self, _immediate: bool) {
-        if !self.is_connected() || self.remote_poll_pending {
+        if self.offline_playing || !self.is_connected() || self.remote_poll_pending {
             return;
         }
         self.remote_poll_pending = true;
@@ -4446,7 +4522,7 @@ impl App {
     }
 
     fn refresh_queue(&mut self, force: bool) {
-        if !self.is_connected() {
+        if !self.is_connected() && !self.offline_playing {
             return;
         }
         if self.resume_only() && matches!(self.queue, Loadable::Loaded(_)) {
@@ -5058,6 +5134,13 @@ impl App {
         match response {
             ApiResponse::Me(result) => match result {
                 Ok(user) => {
+                    if self.user_id().is_some_and(|account| account != user.id) {
+                        self.downloads.clear();
+                        self.offline_playing = false;
+                    }
+                    self.backend.send(Command::ReadDownloads {
+                        account: user.id.clone(),
+                    });
                     if self
                         .offline_library
                         .as_ref()
@@ -5161,6 +5244,9 @@ impl App {
                 }
             }
             ApiResponse::PlaybackState { seq, result } => {
+                if self.offline_playing {
+                    return;
+                }
                 if seq != self.remote_poll_seq {
                     // An older poll finishing late describes the past.
                     return;
@@ -8543,6 +8629,32 @@ impl App {
                     })
                 }
                 Action::Open(Page::Settings) => true,
+                Action::PlayOffline(_) | Action::RemoveDownload(_) => true,
+                Action::TogglePlay
+                | Action::Next
+                | Action::Previous
+                | Action::SetShuffle(_)
+                | Action::Seek(_)
+                | Action::SeekBy(_)
+                | Action::SetRepeat(_)
+                | Action::SetVolume(_)
+                | Action::PreviewVolume(_)
+                | Action::VolumeBy(_)
+                | Action::ToggleMute
+                | Action::ToggleShuffle
+                | Action::CycleRepeat
+                | Action::PlayFromRow { .. }
+                | Action::PlayContext { .. }
+                | Action::AddToQueue { .. }
+                | Action::QueueMany { .. }
+                | Action::ClearQueue
+                | Action::RefreshQueue
+                | Action::ToggleQueuePanel
+                | Action::SetQueueTab(_)
+                    if self.offline_playing =>
+                {
+                    true
+                }
                 Action::Back
                 | Action::Forward
                 | Action::SignOut
@@ -8574,6 +8686,28 @@ impl App {
             self.leave_lyrics_fullscreen(ctx);
         }
         match action {
+            Action::DownloadPlaylist(id) => {
+                if self
+                    .downloads
+                    .values()
+                    .any(|s| matches!(s, crate::offline::Status::Downloading { .. }))
+                {
+                    return;
+                }
+                if let Some(playlist) = self.known_playlist(&id).cloned() {
+                    self.downloads.insert(
+                        id,
+                        crate::offline::Status::Downloading { done: 0, total: 0 },
+                    );
+                    self.backend.send(Command::DownloadPlaylist(playlist));
+                    self.toast(gettext(self.locale, "Downloading…"));
+                }
+            }
+            Action::RemoveDownload(id) => self.backend.send(Command::RemoveDownload(id)),
+            Action::PlayOffline(id) => {
+                self.backend.send(Command::PlayOffline(id));
+                self.toast(gettext(self.locale, "Preparing offline playback…"));
+            }
             Action::Open(page) => self.open(page),
             Action::OpenSongRadio { uri, track } => self.open_song_radio(&uri, &track),
             Action::PrepareTint(url) => {
@@ -10902,6 +11036,69 @@ mod tests {
     use crate::api::models::{
         Episode, Image, Page as ApiPage, ResumePoint, SavedEpisode, SavedTrack, SearchResults,
     };
+
+    #[test]
+    fn offline_controls_work_while_the_account_is_reconnecting() {
+        let mut app = headless_app();
+        app.backend.set_offline(true);
+        app.offline_library = Some(crate::offline_library::Cache::new(
+            User {
+                id: "alice".into(),
+                ..Default::default()
+            },
+            vec![],
+        ));
+        app.user = Some(User {
+            id: "alice".into(),
+            ..Default::default()
+        });
+        app.auth = AuthStatus::Connecting;
+        app.offline_playing = true;
+        app.local_ready = true;
+        app.local.connected = true;
+        app.local.playback = Playback::Playing;
+        app.local.track = Some(crate::player::LocalTrack {
+            uri: "spotify:track:a".into(),
+            duration_ms: 30_000,
+            ..Default::default()
+        });
+        let ctx = egui::Context::default();
+        app.apply(Action::Seek(5000), &ctx);
+        app.apply(Action::SetVolume(42), &ctx);
+        app.apply(Action::TogglePlay, &ctx);
+        let commands = app.backend.take_player_commands();
+        assert!(commands.contains(&PlayerCommand::Seek(5000)));
+        assert!(
+            commands
+                .iter()
+                .any(|command| matches!(command, PlayerCommand::Volume(_)))
+        );
+        assert!(commands.contains(&PlayerCommand::Toggle));
+        app.refresh_queue(true);
+        assert!(
+            app.queue_fetched_at.is_some(),
+            "Offline queue must not require a connected Web API"
+        );
+    }
+
+    #[test]
+    fn spotify_poll_cannot_replace_offline_playback() {
+        let mut app = headless_app();
+        app.offline_playing = true;
+        app.local_ready = true;
+        app.local.playback = Playback::Playing;
+        app.resume_context = Some("spotify:playlist:download".into());
+        let before = app.local.clone();
+        app.handle_api(ApiResponse::PlaybackState {
+            seq: app.remote_poll_seq,
+            result: Ok(None),
+        });
+        assert_eq!(app.local, before);
+        assert_eq!(
+            app.resume_context.as_deref(),
+            Some("spotify:playlist:download")
+        );
+    }
 
     /// #623: the missing-output message the sink reports is the one the
     /// catalogues translate.

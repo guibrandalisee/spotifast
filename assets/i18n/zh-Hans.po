@@ -3084,3 +3084,27 @@ msgstr "点击播放栏更改可视化效果"
 
 msgid "Allow clicks on empty player bar space to change the animation."
 msgstr "允许点击播放栏空白处更改动画。"
+
+#: src/app.rs src/ui/collection.rs
+msgid "Play offline"
+msgstr "离线播放"
+
+#: src/app.rs src/ui/collection.rs
+msgid "Remove download"
+msgstr "移除下载"
+
+#: src/app.rs src/ui/collection.rs
+msgid "Downloading…"
+msgstr "正在下载…"
+
+#: src/app.rs src/ui/collection.rs
+msgid "Download for offline listening"
+msgstr "下载以离线收听"
+
+#: src/app.rs src/ui/collection.rs
+msgid "Download complete"
+msgstr "下载完成"
+
+#: src/app.rs src/ui/collection.rs
+msgid "Preparing offline playback…"
+msgstr "正在准备离线播放…"

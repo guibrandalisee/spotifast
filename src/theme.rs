@@ -407,6 +407,7 @@ fastframe_icons::icons! {
         Clock => lucide "clock",
         Compass => "compass",
         Copy => lucide "copy",
+        Download => "download",
         Disc => "disc-3",
         Ellipsis => lucide "ellipsis",
         Expand => "expand",

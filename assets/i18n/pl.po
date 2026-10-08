@@ -3210,3 +3210,27 @@ msgstr "Zmieniaj wizualizację kliknięciem paska odtwarzania"
 
 msgid "Allow clicks on empty player bar space to change the animation."
 msgstr "Pozwól zmieniać animację kliknięciem pustego miejsca na pasku odtwarzania."
+
+#: src/app.rs src/ui/collection.rs
+msgid "Play offline"
+msgstr "Odtwarzaj offline"
+
+#: src/app.rs src/ui/collection.rs
+msgid "Remove download"
+msgstr "Usuń pobrane pliki"
+
+#: src/app.rs src/ui/collection.rs
+msgid "Downloading…"
+msgstr "Pobieranie…"
+
+#: src/app.rs src/ui/collection.rs
+msgid "Download for offline listening"
+msgstr "Pobierz do słuchania offline"
+
+#: src/app.rs src/ui/collection.rs
+msgid "Download complete"
+msgstr "Pobieranie zakończone"
+
+#: src/app.rs src/ui/collection.rs
+msgid "Preparing offline playback…"
+msgstr "Przygotowywanie odtwarzania offline…"

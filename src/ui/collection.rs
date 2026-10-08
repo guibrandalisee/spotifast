@@ -330,6 +330,65 @@ pub fn actions_row(
                         );
                     }
                     if let Some((page, loading)) = &actions.reload {
+                        if let Page::Playlist(id) = page {
+                            widgets::menu_separator(ui, &palette);
+                            let status = app.downloads.get(id).cloned();
+                            if let Some(crate::offline::Status::Ready { tracks, .. }) = status {
+                                if widgets::menu_item(
+                                    ui,
+                                    &palette,
+                                    Some(Icon::PlayFilled),
+                                    &format!("{} ({tracks})", gettext(locale, "Play offline")),
+                                ) {
+                                    app.actions.push(Action::PlayOffline(id.clone()));
+                                }
+                                if widgets::menu_item(
+                                    ui,
+                                    &palette,
+                                    Some(Icon::Trash),
+                                    &gettext(locale, "Remove download"),
+                                ) {
+                                    app.actions.push(Action::RemoveDownload(id.clone()));
+                                }
+                            } else if let Some(crate::offline::Status::Downloading {
+                                done,
+                                total,
+                            }) = status
+                            {
+                                ui.add_enabled_ui(false, |ui| {
+                                    widgets::menu_item(
+                                        ui,
+                                        &palette,
+                                        Some(Icon::Download),
+                                        &format!(
+                                            "{} {done}/{total}",
+                                            gettext(locale, "Downloading…")
+                                        ),
+                                    );
+                                });
+                            } else {
+                                if app.is_connected()
+                                    && widgets::menu_item(
+                                        ui,
+                                        &palette,
+                                        Some(Icon::Download),
+                                        &gettext(locale, "Download for offline listening"),
+                                    )
+                                {
+                                    app.actions.push(Action::DownloadPlaylist(id.clone()));
+                                }
+                                if matches!(status, Some(crate::offline::Status::Failed(_)))
+                                    && widgets::menu_item(
+                                        ui,
+                                        &palette,
+                                        Some(Icon::Trash),
+                                        &gettext(locale, "Remove download"),
+                                    )
+                                {
+                                    app.actions.push(Action::RemoveDownload(id.clone()));
+                                }
+                            }
+                        }
                         widgets::menu_separator(ui, &palette);
                         let clicked = ui
                             .add_enabled_ui(!loading, |ui| {
@@ -3524,6 +3583,119 @@ mod tests {
                     "an in-flight refresh cannot be repeated"
                 );
                 app.backend.shutdown();
+            }
+        }
+    }
+
+    #[test]
+    fn playlist_download_menu_covers_ready_progress_and_failure_at_two_sizes() {
+        for (width, dark) in [(400.0, true), (800.0, true), (400.0, false), (800.0, false)] {
+            for (status, expected) in [
+                (None, "Download for offline listening"),
+                (
+                    Some(crate::offline::Status::Ready {
+                        tracks: 3,
+                        skipped: 0,
+                    }),
+                    "Play offline (3)",
+                ),
+                (
+                    Some(crate::offline::Status::Downloading { done: 1, total: 3 }),
+                    "Downloading… 1/3",
+                ),
+                (
+                    Some(crate::offline::Status::Failed("Interrupted".into())),
+                    "Remove download",
+                ),
+            ] {
+                let ctx = egui::Context::default();
+                ctx.enable_accesskit();
+                theme::install(&ctx);
+                let mut app = test_app();
+                app.palette = if dark {
+                    Palette::dark()
+                } else {
+                    Palette::light()
+                };
+                app.auth = crate::backend::AuthStatus::Connected {
+                    username: "test".into(),
+                };
+                if let Some(status) = status {
+                    app.downloads.insert("test".into(), status);
+                }
+                let mut frame = |events| {
+                    let mut output = ctx.run_ui(
+                        egui::RawInput {
+                            screen_rect: Some(Rect::from_min_size(
+                                egui::Pos2::ZERO,
+                                vec2(width, 520.0),
+                            )),
+                            events,
+                            ..Default::default()
+                        },
+                        |ui| {
+                            actions_row(
+                                &mut app,
+                                ui,
+                                Actions {
+                                    play_uri: Some("spotify:playlist:test".into()),
+                                    view: None,
+                                    saved: None,
+                                    saved_icons: (Icon::CirclePlus, Icon::CircleCheck),
+                                    saved_tooltips: Default::default(),
+                                    owned_playlist: None,
+                                    reload: Some((Page::Playlist("test".into()), false)),
+                                    name: "Test",
+                                    save_radio: None,
+                                },
+                                None,
+                            );
+                        },
+                    );
+                    output.textures_delta.clear();
+                    output.platform_output.accesskit_update.unwrap()
+                };
+                frame(vec![]);
+                let closed = frame(vec![]);
+                let bounds = closed
+                    .nodes
+                    .iter()
+                    .find(|(_, n)| n.label() == Some("More"))
+                    .unwrap()
+                    .1
+                    .bounds()
+                    .unwrap();
+                let pos = pos2(
+                    ((bounds.x0 + bounds.x1) / 2.0) as f32,
+                    ((bounds.y0 + bounds.y1) / 2.0) as f32,
+                );
+                frame(vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed: false,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ]);
+                let open = frame(vec![]);
+                let node = &open
+                    .nodes
+                    .iter()
+                    .find(|(_, n)| n.label() == Some(expected))
+                    .unwrap_or_else(|| panic!("Missing {expected}"))
+                    .1;
+                let bounds = node.bounds().unwrap();
+                assert!(bounds.x0 >= 0.0 && bounds.x1 <= f64::from(width) && bounds.y1 <= 520.0);
+                if expected.starts_with("Downloading") {
+                    assert!(node.is_disabled());
+                }
             }
         }
     }

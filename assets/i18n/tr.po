@@ -3177,3 +3177,27 @@ msgstr "Oynatma çubuğuna tıklayarak görselleştirmeyi değiştir"
 
 msgid "Allow clicks on empty player bar space to change the animation."
 msgstr "Oynatma çubuğundaki boş alana tıklayarak animasyonun değiştirilmesine izin ver."
+
+#: src/app.rs src/ui/collection.rs
+msgid "Play offline"
+msgstr "Çevrimdışı çal"
+
+#: src/app.rs src/ui/collection.rs
+msgid "Remove download"
+msgstr "İndirmeyi kaldır"
+
+#: src/app.rs src/ui/collection.rs
+msgid "Downloading…"
+msgstr "İndiriliyor…"
+
+#: src/app.rs src/ui/collection.rs
+msgid "Download for offline listening"
+msgstr "Çevrimdışı dinlemek için indir"
+
+#: src/app.rs src/ui/collection.rs
+msgid "Download complete"
+msgstr "İndirme tamamlandı"
+
+#: src/app.rs src/ui/collection.rs
+msgid "Preparing offline playback…"
+msgstr "Çevrimdışı oynatma hazırlanıyor…"

@@ -3172,3 +3172,27 @@ msgstr "Ändra visualisering genom att klicka på uppspelningsfältet"
 
 msgid "Allow clicks on empty player bar space to change the animation."
 msgstr "Tillåt att klick på tomma ytor i uppspelningsfältet ändrar animationen."
+
+#: src/app.rs src/ui/collection.rs
+msgid "Play offline"
+msgstr "Spela offline"
+
+#: src/app.rs src/ui/collection.rs
+msgid "Remove download"
+msgstr "Ta bort nedladdning"
+
+#: src/app.rs src/ui/collection.rs
+msgid "Downloading…"
+msgstr "Laddar ner…"
+
+#: src/app.rs src/ui/collection.rs
+msgid "Download for offline listening"
+msgstr "Ladda ner för att lyssna offline"
+
+#: src/app.rs src/ui/collection.rs
+msgid "Download complete"
+msgstr "Nedladdningen är klar"
+
+#: src/app.rs src/ui/collection.rs
+msgid "Preparing offline playback…"
+msgstr "Förbereder offlineuppspelning…"

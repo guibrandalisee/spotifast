@@ -3091,3 +3091,27 @@ msgstr "點擊播放列變更視覺效果"
 
 msgid "Allow clicks on empty player bar space to change the animation."
 msgstr "允許點擊播放列空白處變更動畫。"
+
+#: src/app.rs src/ui/collection.rs
+msgid "Play offline"
+msgstr "離線播放"
+
+#: src/app.rs src/ui/collection.rs
+msgid "Remove download"
+msgstr "移除下載"
+
+#: src/app.rs src/ui/collection.rs
+msgid "Downloading…"
+msgstr "正在下載…"
+
+#: src/app.rs src/ui/collection.rs
+msgid "Download for offline listening"
+msgstr "下載以離線收聽"
+
+#: src/app.rs src/ui/collection.rs
+msgid "Download complete"
+msgstr "下載完成"
+
+#: src/app.rs src/ui/collection.rs
+msgid "Preparing offline playback…"
+msgstr "正在準備離線播放…"

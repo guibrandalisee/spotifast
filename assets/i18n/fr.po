@@ -3211,3 +3211,27 @@ msgstr "Changer la visualisation en cliquant sur la barre de lecture"
 
 msgid "Allow clicks on empty player bar space to change the animation."
 msgstr "Autoriser les clics dans les espaces vides de la barre de lecture à changer l’animation."
+
+#: src/app.rs src/ui/collection.rs
+msgid "Play offline"
+msgstr "Lire hors connexion"
+
+#: src/app.rs src/ui/collection.rs
+msgid "Remove download"
+msgstr "Supprimer le téléchargement"
+
+#: src/app.rs src/ui/collection.rs
+msgid "Downloading…"
+msgstr "Téléchargement…"
+
+#: src/app.rs src/ui/collection.rs
+msgid "Download for offline listening"
+msgstr "Télécharger pour écouter hors connexion"
+
+#: src/app.rs src/ui/collection.rs
+msgid "Download complete"
+msgstr "Téléchargement terminé"
+
+#: src/app.rs src/ui/collection.rs
+msgid "Preparing offline playback…"
+msgstr "Préparation de la lecture hors connexion…"

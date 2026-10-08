@@ -539,3 +539,12 @@ The last session also keeps the engine-requested track URI as `last_context_trac
 Spotify may play an available release with a different URI; resuming uses the
 original playlist URI while retaining the heard release metadata and position.
 Older session files without this field use `last_track` as before.
+
+In this personal fork, offline playlists live under the state directory's
+`downloads/<account-hash>/<playlist-id>/`. `playlist.json` holds a versioned
+playlist snapshot, audio identifiers, sizes and SHA-256 digests; the audio files
+remain encrypted. Their keys live in separate platform credential-store entries,
+scoped to this profile, account, playlist and audio file. **Remove download** in
+the playlist's More menu deletes that playlist's files and keys. Clearing the
+ordinary audio cache does not remove downloads. Existing settings and session
+files require no migration.

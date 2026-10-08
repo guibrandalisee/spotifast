@@ -3162,3 +3162,27 @@ msgstr "再生バーのクリックでビジュアライザーを変更"
 
 msgid "Allow clicks on empty player bar space to change the animation."
 msgstr "再生バーの空白部分をクリックしてアニメーションを変更できるようにします。"
+
+#: src/app.rs src/ui/collection.rs
+msgid "Play offline"
+msgstr "オフラインで再生"
+
+#: src/app.rs src/ui/collection.rs
+msgid "Remove download"
+msgstr "ダウンロードを削除"
+
+#: src/app.rs src/ui/collection.rs
+msgid "Downloading…"
+msgstr "ダウンロード中…"
+
+#: src/app.rs src/ui/collection.rs
+msgid "Download for offline listening"
+msgstr "オフライン再生用にダウンロード"
+
+#: src/app.rs src/ui/collection.rs
+msgid "Download complete"
+msgstr "ダウンロード完了"
+
+#: src/app.rs src/ui/collection.rs
+msgid "Preparing offline playback…"
+msgstr "オフライン再生を準備中…"

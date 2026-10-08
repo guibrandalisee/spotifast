@@ -467,6 +467,61 @@ fn remove_file(path: &Path) -> Result<(), Error> {
 }
 
 impl Lease {
+    fn audio_key_name(&self, account: &str, file: &str) -> String {
+        format!(
+            "{}:offline:{:x}",
+            self.store.inner.profile,
+            Sha256::digest(format!("{account}:{file}").as_bytes())
+        )
+    }
+
+    /// Audio keys stay in the native store, on the same bounded worker as grants.
+    pub async fn save_audio_key(
+        &self,
+        account: String,
+        file: String,
+        key: [u8; 16],
+    ) -> Result<(), Error> {
+        self.request(true, move |lease, backend| {
+            let name = lease.audio_key_name(&account, &file);
+            backend.write(&name, &key)?;
+            if !lease.current() {
+                let _ = backend.delete(&name);
+                return Err(Error::Stale);
+            }
+            if backend.read(&name)?.as_deref() != Some(key.as_slice()) {
+                return Err(Error::Verification);
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    pub async fn load_audio_key(&self, account: String, file: String) -> Result<[u8; 16], Error> {
+        self.request(true, move |lease, backend| {
+            if lease
+                .store
+                .marker(lease.slot)?
+                .is_some_and(|marker| marker.revoked)
+            {
+                return Err(Error::Stale);
+            }
+            backend
+                .read(&lease.audio_key_name(&account, &file))?
+                .ok_or(Error::Invalid)?
+                .try_into()
+                .map_err(|_| Error::Invalid)
+        })
+        .await
+    }
+
+    pub async fn delete_audio_key(&self, account: String, file: String) -> Result<(), Error> {
+        self.request(true, move |lease, backend| {
+            backend.delete(&lease.audio_key_name(&account, &file))
+        })
+        .await
+    }
+
     pub fn current(&self) -> bool {
         self.store.inner.generations[self.slot.index()].load(Ordering::SeqCst) == self.generation
     }
@@ -945,6 +1000,23 @@ mod tests {
             store.lease(slot).save(grant.clone()).await.unwrap();
         }
         let restarted = Store::new(f.dirs.clone());
+        let audio_lease = store.lease(Slot::Playback);
+        audio_lease
+            .save_audio_key("dummy-user".into(), "dummy-playlist:file".into(), [23; 16])
+            .await
+            .unwrap();
+        assert_eq!(
+            restarted
+                .lease(Slot::Playback)
+                .load_audio_key("dummy-user".into(), "dummy-playlist:file".into())
+                .await
+                .unwrap(),
+            [23; 16]
+        );
+        audio_lease
+            .delete_audio_key("dummy-user".into(), "dummy-playlist:file".into())
+            .await
+            .unwrap();
         for (slot, grant) in Slot::ALL.into_iter().zip(grants) {
             assert!(restarted.lease(slot).load().await.unwrap().grant == Some(grant));
         }
@@ -961,6 +1033,79 @@ mod tests {
                     .is_none()
             );
         }
+    }
+
+    #[tokio::test]
+    async fn offline_keys_survive_restart_and_are_scoped_to_account_and_playlist() {
+        let f = Fixture::new();
+        let lease = f.store.lease(Slot::Playback);
+        lease
+            .save_audio_key("alice".into(), "one:file".into(), [31; 16])
+            .await
+            .unwrap();
+        lease
+            .save_audio_key("alice".into(), "two:file".into(), [32; 16])
+            .await
+            .unwrap();
+        let restarted = f.restart().lease(Slot::Playback);
+        assert_eq!(
+            restarted
+                .load_audio_key("alice".into(), "one:file".into())
+                .await
+                .unwrap(),
+            [31; 16]
+        );
+        assert_eq!(
+            restarted
+                .load_audio_key("bob".into(), "one:file".into())
+                .await,
+            Err(Error::Invalid)
+        );
+        lease
+            .delete_audio_key("alice".into(), "one:file".into())
+            .await
+            .unwrap();
+        assert_eq!(
+            restarted
+                .load_audio_key("alice".into(), "one:file".into())
+                .await,
+            Err(Error::Invalid)
+        );
+        assert_eq!(
+            restarted
+                .load_audio_key("alice".into(), "two:file".into())
+                .await
+                .unwrap(),
+            [32; 16]
+        );
+        f.store.revoke(Slot::Playback).unwrap();
+        assert_eq!(
+            lease
+                .load_audio_key("alice".into(), "two:file".into())
+                .await,
+            Err(Error::Stale)
+        );
+        assert_eq!(
+            f.restart()
+                .lease(Slot::Playback)
+                .load_audio_key("alice".into(), "two:file".into())
+                .await,
+            Err(Error::Stale)
+        );
+    }
+
+    #[tokio::test]
+    async fn locked_store_never_saves_an_offline_key_to_disk() {
+        let f = Fixture::new();
+        f.fake.lock().unwrap().write_error = Some(Error::Locked);
+        assert_eq!(
+            f.store
+                .lease(Slot::Playback)
+                .save_audio_key("alice".into(), "one:file".into(), [31; 16])
+                .await,
+            Err(Error::Locked)
+        );
+        assert!(f.fake.lock().unwrap().values.is_empty());
     }
 
     #[tokio::test]

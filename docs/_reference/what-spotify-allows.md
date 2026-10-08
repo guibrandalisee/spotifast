@@ -113,8 +113,12 @@ The Web API and librespot do not provide these features:
   sender, and the Web API only lists a Cast device once a Spotify app has
   already woken it, so Spotifast cannot discover or start one itself. See
   [issue #566](https://github.com/crmne/spotifast/issues/566).
-- **Offline listening and downloads.** Spotify's DRM and the project's scope
-  rule these out.
+- **Official offline listening and downloads.** Upstream librespot does not
+  provide Spotify's official download-license mechanism. This personal fork
+  independently supports encrypted playlist downloads with audio keys protected
+  by the operating system credential store. Use the playlist's More menu to
+  download, play offline, or remove a download. This does not read the official
+  app's files or synchronize offline listens with Spotify.
 - **Playback speed and crossfade.** librespot supports neither. Spotifast
   would have to add them to its own audio path.
 - **Free-account playback.** Replacing Spotify audio with another source is

@@ -27,10 +27,33 @@ Spotifast is a Spotify client written in Rust with
 **Playback needs Spotify Premium.** Free accounts can browse and search, but
 cannot play music through Spotifast.
 
+### Personal fork: offline playlists
+
+In a playlist's **More** menu, choose **Download for offline listening** while
+local playback is connected. Wait for **Download complete**, then choose
+**Play offline**. Downloaded playlists can also be opened from the saved library
+after restarting without internet. Pause, seek, next, previous, shuffle, repeat,
+volume, the equalizer and visualizers use local playback. **Remove download**
+removes that playlist's audio and protected keys.
+
+This fork stores encrypted Ogg audio and a complete playlist snapshot in the
+application's durable `state/downloads/` directory, separate from disposable
+caches. Audio keys use the operating system credential store. Downloads belong
+to the signed-in account; signing out stops playback and disables key access
+until that account signs in again. An unavailable or locked credential store
+prevents offline playback. Local files, episodes and unavailable playlist rows
+are skipped. A failed download is not shown as complete.
+
+This is a personal implementation, independent of the official Spotify app's
+downloads. It does not import official download files, synchronize offline
+listening history with Spotify, or implement Spotify's official download-license
+renewal mechanism. Start offline playback explicitly from the playlist menu;
+the regular Play button keeps its streaming behavior.
+
 After a successful sign-in, Spotifast keeps the playlist library and visited
 playlist songs for read-only browsing when it starts without a connection. It
 keeps trying to reconnect and refreshes the library when Spotify responds.
-Offline audio playback is not available.
+Offline audio playback is available for playlists explicitly downloaded in this fork.
 
 Spotifast respects Spotify's full rate-limit wait and resumes with one request
 before releasing waiting work. A [personal Spotify app](docs/_guide/make-it-even-faster.md)

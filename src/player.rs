@@ -693,7 +693,7 @@ type SinkAndVolume = (
     Box<dyn VolumeGetter + Send>,
 );
 
-fn sink_builder(
+pub(crate) fn sink_builder(
     config: &EngineConfig,
     state: Arc<Mutex<LocalState>>,
     notify: Notify,

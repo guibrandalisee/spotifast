@@ -32,6 +32,7 @@ pub mod mac_touchbar_crash_guard;
 pub mod milkdrop;
 pub mod model;
 pub mod notch;
+pub mod offline;
 pub mod offline_library;
 pub mod opener;
 pub mod paths;

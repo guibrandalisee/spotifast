@@ -3191,3 +3191,27 @@ msgstr "Cambiar el visualizador al hacer clic en la barra de reproducción"
 
 msgid "Allow clicks on empty player bar space to change the animation."
 msgstr "Permitir que los clics en el espacio vacío de la barra de reproducción cambien la animación."
+
+#: src/app.rs src/ui/collection.rs
+msgid "Play offline"
+msgstr "Reproducir sin conexión"
+
+#: src/app.rs src/ui/collection.rs
+msgid "Remove download"
+msgstr "Eliminar descarga"
+
+#: src/app.rs src/ui/collection.rs
+msgid "Downloading…"
+msgstr "Descargando…"
+
+#: src/app.rs src/ui/collection.rs
+msgid "Download for offline listening"
+msgstr "Descargar para escuchar sin conexión"
+
+#: src/app.rs src/ui/collection.rs
+msgid "Download complete"
+msgstr "Descarga completada"
+
+#: src/app.rs src/ui/collection.rs
+msgid "Preparing offline playback…"
+msgstr "Preparando reproducción sin conexión…"
