@@ -7262,14 +7262,19 @@ impl App {
                 .context_uri
                 .as_deref()
                 .and_then(|uri| uri.strip_prefix("spotify:playlist:"))
-            && self
+            && let Some(uris) = self
                 .downloaded_tracks
                 .get(id)
-                .is_some_and(|uris| !uris.is_empty())
+                .filter(|uris| !uris.is_empty())
         {
-            // Start partial playlists from a saved song. The manifest retains playlist order.
-            request.offset_uri = None;
-            request.offset_position = Some(0);
+            // Start partial playlists from saved audio, respecting the page's shuffle choice.
+            request.offset_uri = shuffle.then(|| {
+                uris.iter()
+                    .nth(rand::random_range(0..uris.len()))
+                    .expect("nonempty downloaded tracks")
+                    .clone()
+            });
+            request.offset_position = (!shuffle).then_some(0);
         }
         if let Some(context) = &request.context_uri {
             keys.push(context.clone());
@@ -16614,6 +16619,78 @@ mod tests {
             );
         }
         app.backend.shutdown();
+    }
+
+    #[test]
+    fn downloaded_playlist_play_uses_shuffle_and_keeps_explicit_rows() {
+        let mut app = headless_app();
+        let context = "spotify:playlist:mix";
+        let saved: std::collections::HashSet<String> = [
+            "spotify:track:first",
+            "spotify:track:second",
+            "spotify:track:third",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        app.downloaded_tracks.insert("mix".into(), saved.clone());
+        // A partial download must choose saved audio even if the page holds other songs.
+        app.playlist_pages.insert(
+            "mix".into(),
+            PlaylistPage {
+                items: PagedList {
+                    items: vec![cached_playlist_row("spotify:track:not-downloaded")],
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        app.offline_playing = true;
+        app.local.connected = true;
+        app.local_device_id = Some("offline-mix".into());
+        app.set_context_shuffle(context, true);
+        let mut starts = std::collections::HashSet::new();
+        for _ in 0..64 {
+            app.play_request(PlayRequest::context(context), false);
+            let commands = app.backend.take_player_commands();
+            let [PlayerCommand::Load(load)] = commands.as_slice() else {
+                panic!("expected one offline load, got {commands:?}");
+            };
+            assert_eq!(load.shuffle, Some(true));
+            assert_eq!(load.offset_index, None);
+            let uri = load.offset_uri.as_ref().expect("a saved starting song");
+            assert!(saved.contains(uri));
+            assert_eq!(
+                app.intent_track.as_ref().map(|intent| &intent.uri),
+                Some(uri)
+            );
+            starts.insert(uri.clone());
+        }
+        assert!(starts.len() > 1, "shuffle must vary the starting song");
+        for shuffle in [false, true] {
+            app.set_context_shuffle(context, shuffle);
+            app.backend.take_player_commands();
+            app.play_request(
+                PlayRequest::context(context).starting_at_uri("spotify:track:second"),
+                false,
+            );
+            let commands = app.backend.take_player_commands();
+            let [PlayerCommand::Load(load)] = commands.as_slice() else {
+                panic!("expected one offline load, got {commands:?}");
+            };
+            assert_eq!(load.offset_uri.as_deref(), Some("spotify:track:second"));
+            assert_eq!(load.shuffle, Some(shuffle));
+        }
+        app.set_context_shuffle(context, false);
+        app.backend.take_player_commands();
+        app.play_request(PlayRequest::context(context), false);
+        let commands = app.backend.take_player_commands();
+        let [PlayerCommand::Load(load)] = commands.as_slice() else {
+            panic!("expected one offline load, got {commands:?}");
+        };
+        assert_eq!(load.offset_uri, None);
+        assert_eq!(load.offset_index, Some(0));
+        assert_eq!(load.shuffle, Some(false));
     }
 
     #[test]

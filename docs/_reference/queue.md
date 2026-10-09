@@ -23,6 +23,11 @@ Starting and resuming are separate actions. With Shuffle off, a playlist's
 Double-clicking a row starts there, including with Shuffle on. **Play** in
 the player bar resumes the current song at its paused position.
 
+In this personal fork, a downloaded playlist's **Play** button with Shuffle on
+chooses a random saved song, including when only part of the playlist is
+downloaded. With Shuffle off it starts at the first saved song. Selecting a
+song directly still starts at that song.
+
 Since 0.10.0, the Shuffle button on a collection page changes the
 collection's playback mode without starting that collection. It can be selected
 before a playback device is active; the next **Play** uses the selection.

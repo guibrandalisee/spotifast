@@ -77,6 +77,9 @@ can reduce dependence on the shared quota for supported requests.
 
 Shuffle is remembered separately for each playlist and radio, with new ones
 starting with shuffle off. These choices survive restarting the app.
+With Shuffle on, a downloaded playlist's Play button starts at a random saved
+song. With Shuffle off it starts at the first saved song; selecting a song
+directly always starts there.
 Repeat, playlist and library text filters, the open queue or lyrics
 panel, and Back/Forward navigation are remembered between launches.
 The last song's details and position are also saved so it appears paused in
