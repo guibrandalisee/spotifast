@@ -299,12 +299,13 @@ pub enum ApiRequest {
         device_id: String,
         play: bool,
     },
-    /// Shuffle on, then start the context, one after the other: sent as two
+    /// Set shuffle, then start the context, one after the other: sent as two
     /// independent requests they race, and shuffle sometimes lost.
     ShufflePlay {
         device_id: Option<String>,
         play: PlayRequest,
         repeat: Option<String>,
+        shuffle: bool,
     },
     AddToQueue {
         uri: String,
@@ -4281,9 +4282,10 @@ async fn handle(
             device_id,
             play,
             repeat,
+            shuffle,
         } => {
             let device = device_id.as_deref();
-            let result = match routed!(set_shuffle(true, device)) {
+            let result = match routed!(set_shuffle(shuffle, device)) {
                 Ok(()) => {
                     if let Some(repeat) = repeat {
                         match routed!(set_repeat(&repeat, device)) {

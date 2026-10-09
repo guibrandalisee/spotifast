@@ -24,11 +24,12 @@ Double-clicking a row starts there, including with Shuffle on. **Play** in
 the player bar resumes the current song at its paused position.
 
 Since 0.10.0, the Shuffle button on a collection page changes the
-global playback mode without starting that collection. It can be selected
+collection's playback mode without starting that collection. It can be selected
 before a playback device is active; the next **Play** uses the selection.
-While another collection plays, toggling Shuffle changes that playback's mode
-without switching to the page's collection. The queue then reflects the new
-play order.
+Each playlist and radio remembers its own choice across app restarts, defaulting
+to off until selected. While another collection plays, toggling Shuffle on a
+playlist or radio saves that page's choice without changing the playing collection.
+Changing Shuffle for the playing collection updates its queue immediately.
 
 Since 0.8.0, starting a playlist in its original order explicitly
 names its first available song from the loaded prefix. If that prefix is not

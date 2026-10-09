@@ -464,6 +464,14 @@ of songs Spotify picks to go with it, without starting playback. Playlist,
 album, and artist menus have **Go to playlist radio**, **Go to album radio**,
 and **Go to artist radio**.
 
+A song radio starts with the song it is based on, followed by Spotify's
+recommendations. Refresh keeps that song first, with no duplicate if Spotify
+also includes it in the mix.
+
+Each radio and playlist remembers its own shuffle setting across app restarts.
+A radio or playlist with no saved choice starts with shuffle off. Changing
+shuffle on a page that is not playing saves the choice for its next playback.
+
 Spotify mixes a radio afresh each time it is asked, so the page keeps the
 songs it shows: **Play**, **Shuffle**, and a double-clicked row play those
 songs, and the queue names the radio. Choose **Refresh** in the page's **…**

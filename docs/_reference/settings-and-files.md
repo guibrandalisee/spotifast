@@ -175,6 +175,11 @@ The last good playlist folder tree is kept in `session.json`, scoped to the
 account that supplied it. This keeps folders visible when local playback is
 temporarily unavailable. Live session data is still required for edit grants.
 
+`session.json` also remembers shuffle choices by playlist or radio URI in
+`context_shuffle`. A collection without a saved choice defaults to shuffle off.
+Older session files remain readable; their global shuffle choice continues to
+apply to other playback contexts.
+
 Since 0.8.0, memory caches retain the open page,
 the playing context, and a limited set of recently used playlist, album,
 artist, and show pages. Older pages reload when revisited, using the saved

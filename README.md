@@ -72,7 +72,9 @@ Spotifast respects Spotify's full rate-limit wait and resumes with one request
 before releasing waiting work. A [personal Spotify app](docs/_guide/make-it-even-faster.md)
 can reduce dependence on the shared quota for supported requests.
 
-Shuffle, Repeat, playlist and library text filters, the open queue or lyrics
+Shuffle is remembered separately for each playlist and radio, with new ones
+starting with shuffle off. These choices survive restarting the app.
+Repeat, playlist and library text filters, the open queue or lyrics
 panel, and Back/Forward navigation are remembered between launches.
 The last song's details and position are also saved so it appears paused in
 the player bar immediately on reopening, before the network responds.
@@ -89,6 +91,9 @@ https://github.com/user-attachments/assets/a5f669ce-b3b7-4f8e-9933-976a78876c7e
 [Features](#your-music-on-your-desktop) · [Install](#install) · [First playback](#start-listening) · [Mini player](#the-winamp-mini-player) · [MilkDrop](#music-in-motion) · [Help](#guides-and-help)
 
 ## Your music, on your desktop
+
+**Go to song radio** opens a mix with the selected song first, followed by
+Spotify's recommendations. Refresh keeps that song first without duplicating it.
 
 | Feature | What you can do |
 |---|---|

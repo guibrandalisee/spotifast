@@ -1,7 +1,7 @@
 //! The application: state, event handling, and the actions views ask for.
 
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -502,8 +502,10 @@ pub struct App {
     optimistic_playing: Option<(bool, Instant)>,
     /// Track shown immediately after a play or skip, until playback reports.
     intent_track: Option<TrackIntent>,
-    /// Requested shuffle mode, applied to every context until changed.
+    /// Requested shuffle mode for current playback.
     shuffle_wanted: bool,
+    /// Saved shuffle choices for individual playlists and radios.
+    context_shuffle: BTreeMap<String, bool>,
     repeat_wanted: Option<RepeatMode>,
     repeat_set_at: Option<Instant>,
     playlist_filters: std::collections::BTreeMap<String, String>,
@@ -952,6 +954,7 @@ impl App {
             optimistic_playing: None,
             intent_track: None,
             shuffle_wanted: session.shuffle_on,
+            context_shuffle: session.context_shuffle,
             repeat_wanted: session.repeat_mode.as_deref().map(RepeatMode::from_api),
             repeat_set_at: None,
             playlist_filters: session.playlist_filters.clone(),
@@ -1468,6 +1471,29 @@ impl App {
 
     pub fn playing_context_shuffle(&self) -> bool {
         self.shuffle_wanted
+    }
+
+    fn has_own_shuffle(uri: &str) -> bool {
+        uri.starts_with("spotify:playlist:") || util::station_seed(uri).is_some()
+    }
+
+    pub fn context_shuffle(&self, uri: &str) -> bool {
+        if Self::has_own_shuffle(uri) {
+            self.context_shuffle.get(uri).copied().unwrap_or(false)
+        } else {
+            self.shuffle_wanted
+        }
+    }
+
+    fn set_context_shuffle(&mut self, uri: &str, shuffle: bool) {
+        if Self::has_own_shuffle(uri) {
+            self.context_shuffle.insert(uri.to_owned(), shuffle);
+            self.session_dirty = true;
+            if self.playing_context_uri().as_deref() != Some(uri) {
+                return;
+            }
+        }
+        self.set_shuffle(shuffle);
     }
 
     /// Current item for menus, using cached track details when available.
@@ -2504,6 +2530,11 @@ impl App {
         {
             // Accept shuffle changes made by another client.
             self.shuffle_wanted = state.shuffle;
+            if let Some(context) = self.playing_context_uri()
+                && Self::has_own_shuffle(&context)
+            {
+                self.context_shuffle.insert(context, state.shuffle);
+            }
             self.session_dirty = true;
         }
         if active_local
@@ -5309,6 +5340,14 @@ impl App {
                         {
                             // Accept shuffle changes from another device.
                             self.shuffle_wanted = current;
+                            if let Some(context) = self
+                                .remote
+                                .as_ref()
+                                .and_then(|remote| remote.state.context.as_ref())
+                                && Self::has_own_shuffle(&context.uri)
+                            {
+                                self.context_shuffle.insert(context.uri.clone(), current);
+                            }
                             self.session_dirty = true;
                         }
                         if let Some(remote) = &self.remote
@@ -7171,13 +7210,33 @@ impl App {
     }
 
     fn play_request(&mut self, request: PlayRequest, shuffle_first: bool) {
-        // Shuffle applies across contexts until disabled. A selected row still
+        self.play_request_from_context(request, shuffle_first, None);
+    }
+
+    fn play_request_from_context(
+        &mut self,
+        request: PlayRequest,
+        shuffle_first: bool,
+        source: Option<&str>,
+    ) {
+        // Playlists and radios restore their own shuffle choice. A selected row still
         // starts first; otherwise choose a random starting track.
         let mut request = request;
         let implicit_start = request.offset_uri.is_none()
             && request.offset_position.is_none()
             && request.uris.is_empty();
         self.queue_shuffle_pending = None;
+        let shuffle_context = request.context_uri.as_deref().or(source);
+        let own_shuffle = shuffle_context.is_some_and(Self::has_own_shuffle);
+        if let Some(context) = shuffle_context
+            && Self::has_own_shuffle(context)
+        {
+            self.shuffle_wanted = self.context_shuffle(context);
+            self.shuffle_set_at = Some(Instant::now());
+            if shuffle_first {
+                self.context_shuffle.insert(context.to_owned(), true);
+            }
+        }
         if shuffle_first {
             self.shuffle_wanted = true;
             self.session_dirty = true;
@@ -7255,7 +7314,7 @@ impl App {
         // for a plain track list. Spotify's state catches up behind it.
         self.assumed_context = Some(AssumedContext {
             uri: request.context_uri.clone().unwrap_or_default(),
-            shuffle: shuffle.then_some(true),
+            shuffle: Some(shuffle),
             at: Instant::now(),
         });
         self.queue_start_pending = Some(self.target());
@@ -7286,7 +7345,7 @@ impl App {
             Target::Local => {
                 self.queued_play = None;
                 let mut load = local_load(&request, shuffle);
-                if self.offline_playing {
+                if self.offline_playing || !shuffle {
                     load.shuffle = Some(shuffle);
                 }
                 if self.offline_playing && !load.uris.is_empty() && load.offset_uri.is_none() {
@@ -7309,11 +7368,12 @@ impl App {
             Target::Remote(Some(device_id)) => {
                 self.queued_play = None;
                 self.repeat_set_at = Some(Instant::now());
-                if shuffle {
+                if shuffle || own_shuffle {
                     self.backend.api(ApiRequest::ShufflePlay {
                         device_id: Some(device_id),
                         play: request,
                         repeat: self.repeat_wanted.map(|mode| mode.api_name().to_string()),
+                        shuffle,
                     });
                 } else {
                     self.backend.api(ApiRequest::Remote {
@@ -7870,6 +7930,11 @@ impl App {
     }
 
     fn set_shuffle(&mut self, shuffle: bool) {
+        if let Some(context) = self.playing_context_uri()
+            && Self::has_own_shuffle(&context)
+        {
+            self.context_shuffle.insert(context, shuffle);
+        }
         self.shuffle_wanted = shuffle;
         self.shuffle_set_at = Some(Instant::now());
         self.session_dirty = true;
@@ -8757,6 +8822,7 @@ impl App {
                     })
                 }
                 Action::Open(Page::Settings) => true,
+                Action::SetContextShuffle { .. } => true,
                 Action::PlayOffline(_) | Action::RemoveDownload(_) => true,
                 Action::PlayContext {
                     uri, offset_uri, ..
@@ -8971,11 +9037,11 @@ impl App {
                         self.cache_track_from_context(&context_uri, uri);
                     }
                     let request = PlayRequest::tracks(uris).starting_at_index(index);
-                    self.play_request(request, false);
+                    self.play_request_from_context(request, false, Some(&context_uri));
                     self.note_recent_context(&context_uri);
                     self.assumed_context = Some(AssumedContext {
                         uri: context_uri,
-                        shuffle: self.shuffle_wanted.then_some(true),
+                        shuffle: Some(self.shuffle_wanted),
                         at: Instant::now(),
                     });
                 }
@@ -9072,6 +9138,7 @@ impl App {
                 self.set_shuffle(!shuffle);
             }
             Action::SetShuffle(shuffle) => self.set_shuffle(shuffle),
+            Action::SetContextShuffle { uri, shuffle } => self.set_context_shuffle(&uri, shuffle),
             Action::CycleRepeat => {
                 let mode = self
                     .now_playing()
@@ -10693,6 +10760,7 @@ impl App {
                     .map(|queue| queue.queue.iter().take(30).cloned().collect())
                     .unwrap_or_default(),
                 shuffle_on: self.shuffle_wanted,
+                context_shuffle: self.context_shuffle.clone(),
                 repeat_mode: self.repeat_wanted.map(|mode| mode.api_name().to_string()),
                 playlist_filters: self.playlist_filters.clone(),
                 library_filter: self.library.filter.clone(),
@@ -16284,6 +16352,102 @@ mod tests {
     }
 
     #[test]
+    fn playlists_and_radios_keep_independent_shuffle_choices() {
+        let mut app = test_app("context-shuffle");
+        app.auth = AuthStatus::Connected {
+            username: "test".into(),
+        };
+        let ctx = egui::Context::default();
+        let playlist = "spotify:playlist:one";
+        let other = "spotify:playlist:two";
+        let station = "spotify:station:track:xyz";
+        app.shuffle_wanted = true;
+        assert!(!app.context_shuffle(playlist));
+        assert!(!app.context_shuffle(station));
+        app.set_context_shuffle(playlist, true);
+        app.set_context_shuffle(station, true);
+        app.set_context_shuffle(station, false);
+        assert!(app.context_shuffle(playlist));
+        assert!(!app.context_shuffle(other));
+        assert!(!app.context_shuffle(station));
+
+        app.backend.set_offline(true);
+        app.local_ready = true;
+        app.local.connected = true;
+        app.play_request(PlayRequest::context(playlist), false);
+        assert!(app.shuffle_wanted);
+        app.backend.take_player_commands();
+        app.apply(
+            Action::PlayFromRow {
+                context: RowContext::View {
+                    uris: vec!["spotify:track:xyz".into(), "spotify:track:next".into()].into(),
+                    context_uri: station.into(),
+                    editable_playlist: None,
+                },
+                uri: "spotify:track:xyz".into(),
+                index: 0,
+            },
+            &ctx,
+        );
+        assert!(!app.shuffle_wanted);
+        assert_eq!(app.playing_context_uri().as_deref(), Some(station));
+        assert!(
+            app.backend
+                .take_player_commands()
+                .iter()
+                .any(|command| matches!(
+                    command, PlayerCommand::Load(load) if load.shuffle == Some(false)
+                ))
+        );
+        app.set_context_shuffle(other, true);
+        assert!(
+            !app.shuffle_wanted,
+            "an inactive playlist does not change playback"
+        );
+        app.set_shuffle(true);
+        assert!(
+            app.context_shuffle(station),
+            "the player button remembers the playing radio"
+        );
+        app.set_shuffle(false);
+
+        app.selected_device = Some("speaker".into());
+        app.play_request_from_context(
+            PlayRequest::tracks(vec![
+                "spotify:track:xyz".into(),
+                "spotify:track:next".into(),
+            ])
+            .starting_at_index(0),
+            false,
+            Some(station),
+        );
+        assert!(matches!(app.backend.take_remote_play_requests().as_slice(),
+            [ApiRequest::ShufflePlay { shuffle: false, play, .. }]
+                if play.uris[0] == "spotify:track:xyz"
+        ));
+
+        app.save_session();
+        let dirs = app.dirs.clone();
+        app.backend.shutdown();
+        let mut restored = App::new(
+            &Waker::default(),
+            dirs,
+            Settings::default(),
+            AppOptions {
+                media_controls: false,
+                restore_sign_in: false,
+                tray: false,
+            },
+        );
+        restored.backend.set_offline(true);
+        assert!(restored.context_shuffle(playlist));
+        assert!(restored.context_shuffle(other));
+        assert!(!restored.context_shuffle(station));
+        assert!(!restored.context_shuffle("spotify:station:track:new"));
+        restored.backend.shutdown();
+    }
+
+    #[test]
     fn playback_preferences_ignore_idle_snapshots_but_follow_connect_changes() {
         let mut app = test_app("playback-preferences-idle");
         app.local_ready = true;
@@ -16328,6 +16492,7 @@ mod tests {
         app.set_shuffle(true);
         app.set_repeat(RepeatMode::Track);
         app.open(Page::Playlist("one".into()));
+        app.set_context_shuffle("spotify:playlist:one", true);
         app.playlist_pages.get_mut("one").unwrap().filter = "artist".into();
         app.library.filter = "favorites".into();
         app.open(Page::Playlist("two".into()));
@@ -22246,7 +22411,8 @@ mod tests {
             "spotify:playlist:pl0",
             egui::pos2(87.0, 28.0),
         );
-        assert!(app.playing_context_shuffle());
+        assert!(app.context_shuffle("spotify:playlist:pl0"));
+        assert!(!app.playing_context_shuffle());
         assert!(app.remote.is_none(), "Shuffle must not start playback");
         assert!(app.backend.take_remote_play_requests().is_empty());
         assert!(
@@ -22322,12 +22488,7 @@ mod tests {
         app.shuffle_wanted = false;
         assert!(app.now_playing().is_none());
 
-        click_collection_action(
-            &ctx,
-            &mut app,
-            "spotify:playlist:pl0",
-            egui::pos2(87.0, 28.0),
-        );
+        app.apply(Action::SetShuffle(true), &ctx);
         assert!(app.playing_context_shuffle());
 
         draw_player_bar(&ctx, &mut app, Vec::new());
@@ -22382,12 +22543,7 @@ mod tests {
             .id = None;
         assert!(matches!(app.target(), Target::Remote(None)));
 
-        click_collection_action(
-            &ctx,
-            &mut app,
-            "spotify:playlist:pl0",
-            egui::pos2(87.0, 28.0),
-        );
+        app.apply(Action::SetShuffle(true), &ctx);
         assert!(matches!(
             app.backend.take_remote_shuffle_requests().as_slice(),
             [ApiRequest::Remote {
@@ -22444,27 +22600,29 @@ mod tests {
             .expect("demo is playing a collection");
         let other_collection = "spotify:playlist:pl0";
         assert_ne!(playing_context, other_collection);
+        app.set_context_shuffle(other_collection, true);
         app.open(Page::Playlist("pl0".into()));
 
         click_collection_action(&ctx, &mut app, other_collection, egui::pos2(87.0, 28.0));
-        assert!(!app.playing_context_shuffle());
+        assert!(app.playing_context_shuffle());
+        assert!(!app.context_shuffle(other_collection));
         assert_eq!(
             app.playing_context_uri().as_deref(),
             Some(playing_context.as_str())
         );
         assert!(
             app.backend.take_remote_play_requests().is_empty(),
-            "changing the global mode must not start the viewed collection"
+            "changing the saved mode must not start the viewed collection"
         );
 
         click_collection_action(&ctx, &mut app, other_collection, egui::pos2(28.0, 28.0));
         let requests = app.backend.take_remote_play_requests();
         assert!(matches!(
             requests.as_slice(),
-            [ApiRequest::Remote {
-                action: RemoteAction::Play,
+            [ApiRequest::ShufflePlay {
+                shuffle: false,
                 device_id: Some(device),
-                play: Some(play),
+                play,
                 ..
             }] if device == "remote1" && play.context_uri.as_deref() == Some(other_collection)
         ));
@@ -23020,6 +23178,7 @@ mod tests {
         let context = "spotify:playlist:playlist";
         for shuffle in [false, true] {
             app.shuffle_wanted = shuffle;
+            app.set_context_shuffle(context, shuffle);
             for request in [
                 PlayRequest::context(context).starting_at_uri("spotify:track:chosen"),
                 PlayRequest::context(context).starting_at_index(7),

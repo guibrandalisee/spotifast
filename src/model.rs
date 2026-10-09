@@ -975,6 +975,11 @@ pub enum Action {
     ToggleShuffle,
     CycleRepeat,
     SetShuffle(bool),
+    /// Remember a collection's shuffle choice without starting playback.
+    SetContextShuffle {
+        uri: String,
+        shuffle: bool,
+    },
     SetRepeat(crate::player::RepeatMode),
     AddToQueue {
         uri: String,

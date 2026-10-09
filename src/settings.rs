@@ -1532,8 +1532,10 @@ pub struct SessionState {
     /// Last good playlist tree, scoped to the account that supplied it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rootlist: Option<CachedRootlist>,
-    /// Shuffle mode saved across contexts and restarts.
+    /// Last playback shuffle mode, retained for contexts without their own choice.
     pub shuffle_on: bool,
+    /// Shuffle choices for individual playlists and radio stations.
+    pub context_shuffle: std::collections::BTreeMap<String, bool>,
     /// Last selected repeat mode; absent in older sessions.
     pub repeat_mode: Option<String>,
     /// Playlist text filters, retained when their pages leave memory.
@@ -1609,6 +1611,7 @@ mod session_tests {
         let state: SessionState = serde_json::from_str(r#"{"last_page":"home"}"#).unwrap();
         assert_eq!(state.last_page.as_deref(), Some("home"));
         assert_eq!(state.rootlist, None);
+        assert!(state.context_shuffle.is_empty());
     }
 
     #[test]

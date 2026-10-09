@@ -69,6 +69,8 @@ clients. Spotifast uses its session for:
 - **Radio and autoplay** through Spotify's context resolver: stations seeded
   by a song, playlist, album, or artist. Each resolution is a fresh mix of 50
   songs, so a radio page plays the songs it shows rather than asking again.
+  Song radios include their seed song first, once, even when the resolver omits
+  it. Its details use the same metadata batch as the recommendations.
 - **Audiobook detection** for saved shows, which the Web API lists as podcasts.
 
 ## librespot playback

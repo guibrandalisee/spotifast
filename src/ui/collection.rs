@@ -184,7 +184,7 @@ pub fn actions_row(
             // A radio is mixed afresh each time Spotify is asked, so it
             // always plays the songs on screen.
             let play_view = actions.view.is_some()
-                && (!app.playing_context_shuffle() || is_filtered || actions.save_radio.is_some());
+                && (!app.context_shuffle(uri) || is_filtered || actions.save_radio.is_some());
             let can_start = actions.view.as_ref().is_none_or(|uris| !uris.is_empty());
             let icon = if now_playing_here {
                 Icon::PauseFilled
@@ -243,7 +243,7 @@ pub fn actions_row(
                     });
                 }
             }
-            let shuffle = app.playing_context_shuffle();
+            let shuffle = app.context_shuffle(uri);
             if theme::icon_button(
                 ui,
                 Icon::Shuffle,
@@ -262,7 +262,10 @@ pub fn actions_row(
             )
             .clicked()
             {
-                app.actions.push(Action::SetShuffle(!shuffle));
+                app.actions.push(Action::SetContextShuffle {
+                    uri: uri.clone(),
+                    shuffle: !shuffle,
+                });
             }
         }
         if let Some((Page::Playlist(id), _)) = &actions.reload {
@@ -3840,7 +3843,7 @@ mod tests {
         ]);
 
         assert!(
-            matches!(app.actions.as_slice(), [Action::SetShuffle(true)]),
+            matches!(app.actions.as_slice(), [Action::SetContextShuffle { uri, shuffle: true }] if uri == "spotify:playlist:test"),
             "shuffle must not start playback: {:?}",
             app.actions
         );
@@ -3850,7 +3853,13 @@ mod tests {
     fn sorted_collection_play_button_plays_context_when_shuffling() {
         let ctx = egui::Context::default();
         let mut app = test_app();
-        app.apply(Action::SetShuffle(true), &ctx);
+        app.apply(
+            Action::SetContextShuffle {
+                uri: "spotify:playlist:test".into(),
+                shuffle: true,
+            },
+            &ctx,
+        );
         app.actions.clear();
 
         let input_layout = egui::RawInput {
@@ -4046,7 +4055,13 @@ mod tests {
     fn sorted_collection_play_button_preserves_filtered_view_when_shuffling() {
         let ctx = egui::Context::default();
         let mut app = test_app();
-        app.apply(Action::SetShuffle(true), &ctx);
+        app.apply(
+            Action::SetContextShuffle {
+                uri: "spotify:playlist:test".into(),
+                shuffle: true,
+            },
+            &ctx,
+        );
         app.actions.clear();
 
         let input_layout = egui::RawInput {

@@ -151,12 +151,12 @@ fn page(items: Vec<PlaylistItem>, total: u32, offset: u32, limit: u32) -> Page<P
     }
 }
 
-/// The songs of Spotify's radio `station`, in Spotify's order, with their
+/// The songs of Spotify's radio `station`, with its seed song first and their
 /// details from one batched request. Spotify mixes a station afresh each
 /// time it is resolved, so the list returned here is the one to play.
 pub async fn station(session: &Session, station: &str) -> anyhow::Result<Vec<Track>> {
     let context = session.spclient().get_context(station).await?;
-    let uris = station_songs(&context);
+    let uris = station_songs(&context, station);
     anyhow::ensure!(!uris.is_empty(), "Spotify has no songs for this radio");
     let found = metadata(session, uris.iter())
         .await
@@ -174,10 +174,15 @@ pub async fn station(session: &Session, station: &str) -> anyhow::Result<Vec<Tra
         .collect())
 }
 
-/// Each song of a resolved station once, named by URI or by raw id.
-fn station_songs(context: &librespot_protocol::context::Context) -> Vec<SpotifyUri> {
+/// Each song of a resolved station once, named by URI or by raw id. The
+/// resolver can omit the seed song; include it first in the same metadata
+/// batch, keeping the other recommendations in Spotify's order.
+fn station_songs(context: &librespot_protocol::context::Context, station: &str) -> Vec<SpotifyUri> {
     let mut seen = BTreeSet::new();
-    context
+    let seed = crate::util::station_seed(station)
+        .and_then(|seed| SpotifyUri::from_uri(&seed).ok())
+        .filter(|uri| matches!(uri, SpotifyUri::Track { .. }));
+    let recommendations = context
         .pages
         .iter()
         .flat_map(|page| &page.tracks)
@@ -189,7 +194,9 @@ fn station_songs(context: &librespot_protocol::context::Context) -> Vec<SpotifyU
                     .map(|id| SpotifyUri::Track { id }),
             },
         )
-        .filter(|uri| matches!(uri, SpotifyUri::Track { .. }))
+        .filter(|uri| matches!(uri, SpotifyUri::Track { .. }));
+    seed.into_iter()
+        .chain(recommendations)
         .filter(|uri| uri.to_uri().is_ok_and(|text| seen.insert(text)))
         .collect()
 }
@@ -1281,6 +1288,47 @@ mod tests {
     }
 
     #[test]
+    fn a_song_station_starts_with_its_seed_once() {
+        use librespot_protocol::context::Context;
+        use librespot_protocol::context_page::ContextPage;
+        use librespot_protocol::context_track::ContextTrack;
+        let seed = "spotify:track:4uLU6hMCjMI75M1A2tKUQC";
+        let other = "spotify:track:3JA9Jsuxr4xgHXEawAdCp4";
+        let station = crate::util::station_uri(seed).unwrap();
+        let by_uri = |uri: &str| ContextTrack {
+            uri: Some(uri.into()),
+            ..Default::default()
+        };
+        let by_gid = ContextTrack {
+            gid: Some(
+                SpotifyId::from_base62("4uLU6hMCjMI75M1A2tKUQC")
+                    .unwrap()
+                    .to_raw()
+                    .to_vec(),
+            ),
+            ..Default::default()
+        };
+        for tracks in [
+            vec![by_uri(other)],
+            vec![by_uri(other), by_uri(seed), by_gid],
+            vec![by_uri(seed), by_uri(other)],
+        ] {
+            let context = Context {
+                pages: vec![ContextPage {
+                    tracks,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+            let uris: Vec<String> = station_songs(&context, &station)
+                .iter()
+                .map(|uri| uri.to_uri().unwrap())
+                .collect();
+            assert_eq!(uris, [seed, other]);
+        }
+    }
+
+    #[test]
     fn a_station_lists_each_song_once_in_spotify_order() {
         use librespot_protocol::context::Context;
         use librespot_protocol::context_page::ContextPage;
@@ -1313,10 +1361,11 @@ mod tests {
             ],
             ..Default::default()
         };
-        let uris: Vec<String> = station_songs(&context)
-            .iter()
-            .map(|uri| uri.to_uri().unwrap())
-            .collect();
+        let uris: Vec<String> =
+            station_songs(&context, "spotify:station:playlist:4uLU6hMCjMI75M1A2tKUQC")
+                .iter()
+                .map(|uri| uri.to_uri().unwrap())
+                .collect();
         assert_eq!(
             uris,
             [

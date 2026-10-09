@@ -264,6 +264,13 @@ run when Home refreshes: on opening Home, at most once every ten minutes, and
 on a manual refresh. A rate limit, exhausted quota or expired sign-in stops the
 remaining shows for that refresh; the shelf keeps what it showed before.
 
+## Playback shuffle
+
+Playlists and radios restore their own saved shuffle choice when playback starts.
+On a remote Connect device, Spotifast sets shuffle first and starts playback
+after that request succeeds, including when the saved choice is off. This uses
+the existing Web API grant and adds no polling or permission.
+
 ## Album queueing
 
 Since 0.9.0, adding an album, single, or EP to the queue resolves
