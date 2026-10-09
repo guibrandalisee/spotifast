@@ -220,14 +220,16 @@ where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<T>>,
 {
-    for attempt in 0..3 {
+    // One initial attempt and five retries, shared by the whole song rather
+    // than a separate retry budget for metadata, keys, and audio transfers.
+    for attempt in 0..=5 {
         check(lease)?;
         match operation().await {
             Ok(value) => return Ok(value),
-            Err(error) if attempt == 2 || key_refused(&error) => return Err(error),
+            Err(error) if attempt == 5 => return Err(error),
             Err(_) => {
                 check(lease)?;
-                tokio::time::sleep(Duration::from_secs(1 << attempt)).await;
+                tokio::time::sleep(Duration::from_secs(30 + 15 * attempt)).await;
             }
         }
     }
@@ -282,15 +284,9 @@ fn formats(bitrate: u16) -> [AudioFileFormat; 7] {
 }
 
 async fn resolve_audio(session: &Session, uri: SpotifyUri, lease: &Lease) -> Result<AudioItem> {
-    let item = retry(lease, || async {
-        Ok(AudioItem::get_file(session, uri.clone()).await?)
-    })
-    .await?;
+    let item = AudioItem::get_file(session, uri).await?;
     resolve_available(item, lease, |alternative| async move {
-        retry(lease, || async {
-            Ok(AudioItem::get_file(session, alternative.clone()).await?)
-        })
-        .await
+        Ok(AudioItem::get_file(session, alternative).await?)
     })
     .await
 }
@@ -360,7 +356,8 @@ fn progress_snapshot(
 }
 
 // A refusal can also represent session throttling. Persist progress and stop
-// requesting more keys until an explicit retry; other song failures may proceed.
+// requesting more keys after automatic retries are exhausted; other song
+// failures may proceed.
 async fn save_download_failure(
     dirs: &AppDirs,
     lease: &Lease,
@@ -518,7 +515,7 @@ pub async fn download(
             .await?;
             continue;
         }
-        let result: Result<(DownloadedTrack, [u8; 16])> = async {
+        let result: Result<(DownloadedTrack, [u8; 16])> = retry(&lease, || async {
             let uri = SpotifyUri::from_uri(&track.uri)?;
             let item = resolve_audio(&session, uri.clone(), &lease).await?;
             let (format, file_id) = formats(bitrate)
@@ -537,19 +534,19 @@ pub async fn download(
             };
             // librespot requests the key with the original track ID, even for an alternative.
             let track_id = (&uri).try_into()?;
-            let key = retry(&lease, || async {
-                Ok(session.audio_key().request(track_id, file_id).await?)
-            })
-            .await
-            .with_context(|| {
-                format!(
-                    "Unable to authorize '{}'. Retry to resume the download",
-                    track.name
-                )
-            })?;
+            let key = session
+                .audio_key()
+                .request(track_id, file_id)
+                .await
+                .with_context(|| {
+                    format!(
+                        "Unable to authorize '{}'. Retry to resume the download",
+                        track.name
+                    )
+                })?;
             let file = file_id.to_string();
             let out = dir.join(&file);
-            let (size, sha256) = retry(&lease, || async {
+            let (size, sha256) = async {
                 let audio = AudioFile::open(&session, file_id, 40_000).await?;
                 let io_lease = lease.clone();
                 let out = out.clone();
@@ -595,8 +592,8 @@ pub async fn download(
                     result
                 })
                 .await??;
-                Ok((size, sha256))
-            })
+                Ok::<_, anyhow::Error>((size, sha256))
+            }
             .await
             .with_context(|| {
                 format!(
@@ -623,7 +620,7 @@ pub async fn download(
                 },
                 key.0,
             ))
-        }
+        })
         .await;
         let (entry, key) = match result {
             Ok(entry) => entry,
@@ -1513,13 +1510,16 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn spotify_key_refusal_is_not_retried_as_a_timeout() {
+    async fn spotify_key_refusal_retries_with_increasing_cooldowns() {
         let (dirs, _, _, _) = fixture();
         let store = crate::credentials::Store::in_memory(dirs.clone());
         let lease = store.lease(crate::credentials::Slot::Playback);
         let calls = std::sync::atomic::AtomicUsize::new(0);
+        let started = tokio::time::Instant::now();
         let result: Result<()> = retry(&lease, || async {
-            calls.fetch_add(1, Ordering::SeqCst);
+            let attempt = calls.fetch_add(1, Ordering::SeqCst);
+            let elapsed = [0, 30, 75, 135, 210, 300][attempt];
+            assert_eq!(started.elapsed(), Duration::from_secs(elapsed));
             Err(
                 anyhow::Error::new(librespot_core::Error::unavailable(AudioKeyError::AesKey))
                     .context("song authorization"),
@@ -1527,9 +1527,29 @@ mod tests {
         })
         .await;
         assert!(result.is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 6);
+        std::fs::remove_dir_all(dirs.state.parent().unwrap()).unwrap();
+    }
+    #[tokio::test(start_paused = true)]
+    async fn signing_out_during_retry_wait_prevents_another_request() {
+        let (dirs, _, _, _) = fixture();
+        let store = crate::credentials::Store::in_memory(dirs.clone());
+        let lease = store.lease(crate::credentials::Slot::Playback);
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let download = retry(&lease, || async {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Err::<(), _>(anyhow::anyhow!("stalled transfer"))
+        });
+        let sign_out = async {
+            tokio::time::sleep(Duration::from_secs(15)).await;
+            store.invalidate(crate::credentials::Slot::Playback);
+        };
+        let (result, ()) = tokio::join!(download, sign_out);
+        assert!(result.unwrap_err().to_string().contains("account changed"));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         std::fs::remove_dir_all(dirs.state.parent().unwrap()).unwrap();
     }
+
     #[tokio::test(start_paused = true)]
     async fn stalled_audio_retries_then_succeeds_and_permanent_failure_is_bounded() {
         let (dirs, _, _, _) = fixture();
@@ -1537,7 +1557,7 @@ mod tests {
         let lease = store.lease(crate::credentials::Slot::Playback);
         let calls = std::sync::atomic::AtomicUsize::new(0);
         let result = retry(&lease, || async {
-            if calls.fetch_add(1, Ordering::SeqCst) < 2 {
+            if calls.fetch_add(1, Ordering::SeqCst) < 5 {
                 return Err(
                     std::io::Error::new(std::io::ErrorKind::TimedOut, "stalled range").into(),
                 );
@@ -1547,7 +1567,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(result, 42);
-        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!(calls.load(Ordering::SeqCst), 6);
         calls.store(0, Ordering::SeqCst);
         let result: Result<()> = retry(&lease, || async {
             calls.fetch_add(1, Ordering::SeqCst);
@@ -1555,7 +1575,7 @@ mod tests {
         })
         .await;
         assert!(result.is_err());
-        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!(calls.load(Ordering::SeqCst), 6);
         store.invalidate(crate::credentials::Slot::Playback);
         let result = retry(&lease, || async {
             calls.fetch_add(1, Ordering::SeqCst);
@@ -1563,7 +1583,7 @@ mod tests {
         })
         .await;
         assert!(result.is_err());
-        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!(calls.load(Ordering::SeqCst), 6);
         std::fs::remove_dir_all(dirs.state.parent().unwrap()).unwrap();
     }
 

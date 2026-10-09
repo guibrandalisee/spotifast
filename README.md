@@ -45,7 +45,9 @@ caches. Audio keys use the operating system credential store. Downloads belong
 to the signed-in account; signing out stops playback and disables key access
 until that account signs in again. An unavailable or locked credential store
 prevents offline playback. Local files, episodes and unavailable playlist rows
-are skipped. Temporary network failures retry up to three times. Each completed
+are skipped. A failed song is retried automatically up to five times, waiting
+30, 45, 60, 75 and 90 seconds between attempts. The retry budget covers the whole
+song, including metadata, audio authorization and file transfer. Each completed
 song is saved atomically, including its protected key, so an interrupted download
 can be resumed with **Retry download**. Completed songs remain playable even if
 the rest of the playlist fails; the playlist is not marked fully available until
@@ -53,8 +55,9 @@ all supported songs finish. Resuming checks saved audio before reusing it.
 Downloads resolve available Spotify alternatives and accept the Ogg/MP3 formats
 supported by librespot. An unavailable format or failed transfer does not stop
 the remaining songs.
-A refused audio key pauses the download to avoid more requests against a
-possibly throttled session. A later explicit retry reuses completed audio.
+A refused audio key follows the same automatic retry schedule. If all five
+retries fail, it pauses the download to avoid further requests against a possibly
+throttled session. A later explicit retry reuses completed audio.
 
 This is a personal implementation, independent of the official Spotify app's
 downloads. It does not import official download files, synchronize offline

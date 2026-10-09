@@ -8,11 +8,12 @@ nav_order: 1
 
 In this personal fork, offline playlist downloads request complete audio files
 through librespot's loader in random-access mode, instead of relying on playback
-read-ahead. Transient metadata, audio-key and file-transfer failures have up to
-three attempts with bounded backoff. Explicit Spotify audio-key refusals are not
-retried as timeouts. They pause the download and preserve completed audio,
-because the response cannot reliably distinguish a track refusal from session
-throttling. A later explicit retry resumes from saved audio. Other song failures
+read-ahead. Each failed song has up to five automatic retries, waiting 30, 45,
+60, 75 and 90 seconds. This budget covers metadata, audio keys and file transfer
+together. Explicit Spotify audio-key refusals follow the same cooldown schedule.
+If they persist after all five retries, they pause the download and preserve
+completed audio, because the response cannot reliably distinguish a track refusal
+from session throttling. A later explicit retry resumes from saved audio. Other song failures
 are recorded and the next song proceeds.
 Metadata alternatives and Ogg/MP3 format preferences follow librespot playback.
 Each completed track checkpoints the playlist
