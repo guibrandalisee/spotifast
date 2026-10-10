@@ -39,6 +39,10 @@ after restarting without internet. Pause, seek, next, previous, shuffle, repeat,
 volume, the equalizer and visualizers use local playback. **Remove download**
 removes that playlist's audio and protected keys.
 
+Offline Play loads the selected song's protected key and checks that audio file's
+integrity before decoding. Other songs are checked when they are selected or
+reach their turn, so starting playback does not scan the entire playlist.
+
 This fork stores encrypted Ogg audio and a complete playlist snapshot in the
 application's durable `state/downloads/` directory, separate from disposable
 caches. Audio keys use the operating system credential store. Downloads belong

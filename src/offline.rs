@@ -714,7 +714,8 @@ pub async fn remove(dirs: AppDirs, account: String, id: String, lease: Lease) ->
 
 pub struct Prepared {
     pub manifest: Manifest,
-    sources: Vec<(PathBuf, [u8; 16])>,
+    sources: Vec<(PathBuf, String)>,
+    lease: Lease,
     context_len: usize,
     manual: VecDeque<usize>,
 }
@@ -722,10 +723,30 @@ pub struct Prepared {
 pub(crate) struct CarriedTrack {
     account: String,
     entry: DownloadedTrack,
-    source: (PathBuf, [u8; 16]),
+    source: (PathBuf, String),
 }
 
 impl Prepared {
+    /// Resolve only the selected song. Unplayed songs must not delay playback.
+    async fn source(&self, index: usize) -> Result<(PathBuf, [u8; 16])> {
+        check(&self.lease)?;
+        let (path, key_name) = &self.sources[index];
+        let key = self
+            .lease
+            .load_audio_key(self.manifest.account.clone(), key_name.clone())
+            .await?;
+        let path = path.clone();
+        let entry = self.manifest.tracks[index].clone();
+        let lease = self.lease.clone();
+        tokio::task::spawn_blocking(move || {
+            check(&lease)?;
+            verify_audio(&path, &entry)?;
+            check(&lease)?;
+            Ok((path, key))
+        })
+        .await?
+    }
+
     pub(crate) fn with_manual(mut self, carried: Vec<CarriedTrack>) -> Self {
         for track in carried {
             if track.account != self.manifest.account {
@@ -740,6 +761,7 @@ impl Prepared {
 }
 
 pub async fn prepare(dirs: AppDirs, account: String, id: String, lease: Lease) -> Result<Prepared> {
+    check(&lease)?;
     let read_dirs = dirs.clone();
     let read_account = account.clone();
     let read_id = id.clone();
@@ -749,30 +771,17 @@ pub async fn prepare(dirs: AppDirs, account: String, id: String, lease: Lease) -
     let dir = directory(&dirs, &account, &id)?;
     let mut sources = Vec::with_capacity(manifest.tracks.len());
     for entry in &manifest.tracks {
-        let key = lease
-            .load_audio_key(account.clone(), key_id(&id, &entry.file))
-            .await?;
-        sources.push((dir.join(&entry.file), key));
+        sources.push((dir.join(&entry.file), key_id(&id, &entry.file)));
     }
     let context_len = manifest.tracks.len();
-    let prepared = Prepared {
+    check(&lease)?;
+    Ok(Prepared {
         manifest,
         sources,
+        lease,
         context_len,
         manual: VecDeque::new(),
-    };
-    tokio::task::spawn_blocking(move || -> Result<_> {
-        let mut verified = std::collections::HashSet::new();
-        for (entry, (path, _)) in prepared.manifest.tracks.iter().zip(&prepared.sources) {
-            check(&lease)?;
-            if !verified.insert(path.clone()) {
-                continue;
-            }
-            verify_audio(path, entry)?;
-        }
-        Ok(prepared)
     })
-    .await?
 }
 
 /// A bounded, seekable view of decrypted Ogg data after Spotify's custom header.
@@ -918,9 +927,11 @@ impl OfflinePlayer {
         let queue = Arc::new(Mutex::new(Queue::default()));
         let thread_stop = stop.clone();
         let thread_queue = queue.clone();
+        let runtime = tokio::runtime::Handle::current();
         std::thread::Builder::new()
             .name("offline-playback".into())
             .spawn(move || {
+                let _runtime = runtime.enter();
                 if let Err(error) = run(
                     prepared,
                     config,
@@ -1008,6 +1019,7 @@ fn run(
     stop: Arc<AtomicBool>,
     queue: Arc<Mutex<Queue>>,
 ) -> Result<()> {
+    let runtime = tokio::runtime::Handle::current();
     let mixer = mixer::find(Some("softvol")).context("Missing audio mixer")?(MixerConfig {
         volume_ctrl: VolumeCtrl::Cubic(VolumeCtrl::DEFAULT_DB_RANGE),
         ..Default::default()
@@ -1208,10 +1220,10 @@ fn run(
         if let Some(index) = load {
             audio.interrupt();
             sink.stop()?;
-            let (path, key) = &prepared.sources[index];
+            let (path, key) = runtime.block_on(prepared.source(index))?;
             let (mut next, factor) = decode(
-                path,
-                *key,
+                &path,
+                key,
                 config.normalisation,
                 prepared.manifest.tracks[index].encoding,
             )?;
@@ -1302,13 +1314,15 @@ fn run(
                     let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
                     if let Some(index) = order.next(s.repeat, true) {
                         let uri = prepared.manifest.tracks[index].track.uri.clone();
-                        let (path, key) = &prepared.sources[index];
+                        drop(s);
+                        let (path, key) = runtime.block_on(prepared.source(index))?;
                         let (next, factor) = crate::offline::decode(
-                            path,
-                            *key,
+                            &path,
+                            key,
                             config.normalisation,
                             prepared.manifest.tracks[index].encoding,
                         )?;
+                        let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
                         current_decoder = Some(next);
                         gain = factor;
                         normalisation.store(factor.to_bits(), Ordering::Relaxed);
@@ -1737,24 +1751,40 @@ mod tests {
             .save_audio_key("alice".into(), key_id("mix", &manifest.tracks[0].file), key)
             .await
             .unwrap();
-        assert!(
-            prepare(dirs.clone(), "alice".into(), "mix".into(), lease.clone())
-                .await
-                .is_ok()
-        );
+        let prepared = prepare(dirs.clone(), "alice".into(), "mix".into(), lease.clone())
+            .await
+            .unwrap();
+        assert_eq!(prepared.source(0).await.unwrap(), (path.clone(), key));
         std::fs::write(&path, vec![1; manifest.tracks[0].size as usize]).unwrap();
-        assert!(
-            prepare(dirs.clone(), "alice".into(), "mix".into(), lease.clone())
-                .await
-                .is_err()
-        );
+        assert!(prepared.source(0).await.is_err());
         std::fs::remove_file(&path).unwrap();
-        assert!(
-            prepare(dirs.clone(), "alice".into(), "mix".into(), lease)
-                .await
-                .is_err()
-        );
+        assert!(prepared.source(0).await.is_err());
         assert!(Manifest::read(&dirs, "bob", "mix").is_err());
+        std::fs::remove_dir_all(dirs.state.parent().unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn unplayed_missing_audio_and_keys_do_not_block_the_selected_song() {
+        let (dirs, mut manifest, path, key) = fixture();
+        let store = crate::credentials::Store::in_memory(dirs.clone());
+        let lease = store.lease(crate::credentials::Slot::Playback);
+        lease
+            .save_audio_key("alice".into(), key_id("mix", &manifest.tracks[0].file), key)
+            .await
+            .unwrap();
+        let mut missing = manifest.tracks[0].clone();
+        missing.file = "b".repeat(40);
+        manifest.tracks.insert(0, missing);
+        manifest.total = 2;
+        checkpoint(&dirs, &lease, &manifest).await.unwrap();
+        let prepared = prepare(dirs.clone(), "alice".into(), "mix".into(), lease)
+            .await
+            .unwrap();
+        assert_eq!(prepared.context_len, 2);
+        assert_eq!(prepared.source(1).await.unwrap(), (path, key));
+        assert!(prepared.source(0).await.is_err());
+        store.invalidate(crate::credentials::Slot::Playback);
+        assert!(prepared.source(1).await.is_err());
         std::fs::remove_dir_all(dirs.state.parent().unwrap()).unwrap();
     }
 
@@ -1783,25 +1813,40 @@ mod tests {
         }
         assert_ne!(root(&dirs, "one"), root(&dirs, "two"));
     }
-    #[test]
-    fn switching_playlists_preserves_manual_duplicates_without_expanding_context() {
+    #[tokio::test]
+    async fn switching_playlists_preserves_manual_duplicates_without_expanding_context() {
         let (dirs, manifest, path, key) = fixture();
+        let store = crate::credentials::Store::in_memory(dirs.clone());
+        let lease = store.lease(crate::credentials::Slot::Playback);
+        let key_name = key_id("mix", &manifest.tracks[0].file);
+        lease
+            .save_audio_key("alice".into(), key_name.clone(), key)
+            .await
+            .unwrap();
+        let mut other = manifest.clone();
+        other.playlist.id = "other".into();
+        other.playlist.uri = "spotify:playlist:other".into();
         let mut prepared = Prepared {
-            manifest: manifest.clone(),
-            sources: vec![(path.clone(), key)],
+            manifest: other,
+            sources: vec![(path.clone(), key_id("other", &manifest.tracks[0].file))],
+            lease,
             context_len: 1,
             manual: VecDeque::new(),
         };
         let carried = |account: &str| CarriedTrack {
             account: account.into(),
             entry: manifest.tracks[0].clone(),
-            source: (path.clone(), key),
+            source: (path.clone(), key_name.clone()),
         };
         prepared = prepared.with_manual(vec![carried("alice"), carried("alice"), carried("bob")]);
         assert_eq!(prepared.context_len, 1);
         assert_eq!(prepared.manual, VecDeque::from([1, 2]));
         assert_eq!(prepared.manifest.tracks.len(), 3);
         assert_eq!(prepared.sources.len(), 3);
+        assert!(prepared.source(0).await.is_err());
+        for index in [1, 2] {
+            assert_eq!(prepared.source(index).await.unwrap(), (path.clone(), key));
+        }
         std::fs::remove_dir_all(dirs.state.parent().unwrap()).unwrap();
     }
     #[test]

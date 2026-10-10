@@ -353,8 +353,11 @@ only in the platform credential store, with the same worker and sign-out
 generation guards as playback credentials. No key or plaintext audio is written
 to JSON or logs. Repeated songs remain repeated in playback order.
 
-Offline playback loads local metadata and protected keys, verifies audio size
-and SHA-256, and starts a local decoder without authenticating a Spotify session
+Offline playback loads the local playlist metadata, then retrieves only the
+selected song's protected key and verifies its audio size and SHA-256 before
+decoding. Each later song goes through the same checks when selected or when its
+turn arrives, including manually queued songs carried from another playlist.
+Unplayed files and keys do not delay startup. This starts a local decoder without authenticating a Spotify session
 or registering a Connect device. It uses the normal output, EQ, visualizers and
 volume path. Connect playback is stopped when offline playback starts. Offline
 queue reads are answered locally, and delayed Spotify playback responses cannot
