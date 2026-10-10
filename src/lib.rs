@@ -36,6 +36,7 @@ pub mod offline;
 pub mod offline_library;
 pub mod opener;
 pub mod paths;
+mod persistence;
 pub mod player;
 pub mod playlist_cover;
 pub mod resample;

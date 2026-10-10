@@ -46,6 +46,9 @@ a changed file is checked again before use. Starting playback does not scan the
 entire playlist. Paused offline playback waits for commands, and its queue is
 rebuilt only when the play order changes.
 
+Settings and session snapshots are written by one background worker. Pending
+changes to the same file are combined, and quitting waits for the latest saves.
+
 This fork stores encrypted Ogg audio and a complete playlist snapshot in the
 application's durable `state/downloads/` directory, separate from disposable
 caches. Audio keys use the operating system credential store. Downloads belong

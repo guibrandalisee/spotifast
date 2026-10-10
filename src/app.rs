@@ -253,6 +253,7 @@ pub struct App {
     proxy_form_edited: bool,
     settings_dirty: bool,
     last_settings_save: Instant,
+    persistence: crate::persistence::Writer,
     pub backend: Backend,
     media_controls: Option<MediaControls>,
     /// The desktop's light or dark preference, for "Follow system".
@@ -771,6 +772,7 @@ impl App {
         let palette = settings.cached_palette().unwrap_or_else(Palette::dark);
         let mut app = Self {
             custom_themes: theme::Catalog::default(),
+            persistence: crate::persistence::Writer::new(dirs.clone()),
             dirs,
             settings,
             applied_proxy,
@@ -3469,7 +3471,7 @@ impl App {
         }
         let mut saved = self.settings.clone();
         self.applied_proxy_preferences.apply_to(&mut saved);
-        saved.save(&self.dirs.settings_file());
+        self.persistence.settings(saved);
     }
 
     /// Called at launch or by the local reload command. Construction and window
@@ -10737,7 +10739,7 @@ impl App {
             self.resume_position_ms = now.position_ms;
         }
         if !self.offline {
-            SessionState {
+            self.persistence.session(SessionState {
                 last_page: Some(self.page().encode()),
                 recent_contexts: self.recent_contexts.clone(),
                 last_context: self.resume_context.clone(),
@@ -10789,14 +10791,14 @@ impl App {
                         maximized: self.lyrics_restore_maximized,
                     }
                 }),
-            }
-            .save(&self.dirs.session_file());
+            });
         }
     }
 
     /// Final teardown at real quit.
     pub fn shutdown(&mut self) {
         self.save_state();
+        self.persistence.flush();
         self.backend.shutdown();
     }
 }
@@ -13038,6 +13040,7 @@ mod tests {
         app.lyrics_fullscreen = Some(false);
         app.lyrics_restore_maximized = true;
         app.save_session();
+        app.persistence.flush();
         let session = SessionState::load(&app.dirs.session_file());
         assert_eq!(
             session.lyrics_fullscreen_from,
@@ -13049,6 +13052,7 @@ mod tests {
 
         app.lyrics_fullscreen = None;
         app.save_session();
+        app.persistence.flush();
         let text = std::fs::read_to_string(app.dirs.session_file()).unwrap();
         assert!(!text.contains("lyrics_fullscreen_from"));
         assert_eq!(
@@ -13153,6 +13157,7 @@ mod tests {
             "no catalogue response is needed"
         );
         app.save_session();
+        app.persistence.flush();
         let dirs = app.dirs.clone();
         app.backend.shutdown();
         let mut restored = App::new(
@@ -13198,6 +13203,7 @@ mod tests {
         assert!(!restored.resume_metadata_refresh_needed);
         assert_eq!(restored.now_playing().unwrap().title, "Karma Police");
         restored.save_session();
+        restored.persistence.flush();
         let mut session = SessionState::load(&dirs.session_file());
         assert_eq!(session.last_position_ms, 19_566);
         assert_eq!(
@@ -13245,6 +13251,7 @@ mod tests {
         app.on_now_playing_changed();
         assert_eq!(app.resume_position_ms, 19_566);
         app.save_session();
+        app.persistence.flush();
         assert_eq!(
             app.resume_position_ms, 19_566,
             "closing again must not lose the position"
@@ -13280,6 +13287,7 @@ mod tests {
             at: Instant::now(),
         });
         app.save_session();
+        app.persistence.flush();
         let saved = SessionState::load(&app.dirs.session_file());
         assert_eq!(
             saved.last_track.as_deref(),
@@ -13327,6 +13335,7 @@ mod tests {
         assert!(app.now_playing().unwrap().resuming);
         assert!(app.now_playing_live().is_none());
         app.save_session();
+        app.persistence.flush();
         let saved = SessionState::load(&app.dirs.session_file());
         assert_eq!(saved.last_context.as_deref(), Some("spotify:playlist:pl1"));
         assert_eq!(saved.last_position_ms, 19_566);
@@ -13352,10 +13361,12 @@ mod tests {
             ..Default::default()
         });
         app.save_session();
+        app.persistence.flush();
         assert_eq!(app.resume_context.as_deref(), Some("spotify:playlist:pl1"));
         // A different song with no known source must not inherit the old playlist.
         app.local.track.as_mut().unwrap().uri = "spotify:track:other".into();
         app.save_session();
+        app.persistence.flush();
         assert_eq!(app.resume_context, None);
         app.backend.shutdown();
     }
@@ -13376,6 +13387,7 @@ mod tests {
             at: Instant::now() - ASSUMED_CONTEXT_HOLD - Duration::from_secs(1),
         });
         app.save_session();
+        app.persistence.flush();
         let saved = SessionState::load(&app.dirs.session_file());
         assert_eq!(saved.last_context.as_deref(), Some("spotify:playlist:pl1"));
         // A deliberate standalone play must not inherit that playlist.
@@ -16432,6 +16444,8 @@ mod tests {
         ));
 
         app.save_session();
+
+        app.persistence.flush();
         let dirs = app.dirs.clone();
         app.backend.shutdown();
         let mut restored = App::new(
@@ -16504,6 +16518,7 @@ mod tests {
         app.apply(Action::Back, &ctx);
         app.apply(Action::ToggleLyricsPanel, &ctx);
         app.save_session();
+        app.persistence.flush();
         let dirs = app.dirs.clone();
         app.backend.shutdown();
         let mut restored = App::new(
@@ -16550,6 +16565,7 @@ mod tests {
             .filter
             .clear();
         restored.save_session();
+        restored.persistence.flush();
         assert!(
             SessionState::load(&dirs.session_file())
                 .playlist_filters
@@ -16557,6 +16573,7 @@ mod tests {
         );
         restored.apply(Action::ToggleQueuePanel, &ctx);
         restored.save_session();
+        restored.persistence.flush();
         let session = SessionState::load(&dirs.session_file());
         assert_eq!(session.queue_open, Some(true));
         assert!(!session.lyrics_open);
@@ -16947,6 +16964,7 @@ mod tests {
         expected.accent = egui::Color32::from_rgb(140, 63, 165);
         assert_eq!(app.palette, expected);
         app.save_settings();
+        app.persistence.flush();
         let accepted = Settings::load(&app.dirs.settings_file());
         assert!(accepted.custom_theme_cache.is_some());
 
@@ -16993,6 +17011,7 @@ mod tests {
                 .contains("last usable")
             );
             restored.save_settings();
+            restored.persistence.flush();
             assert_eq!(Settings::load(&restored.dirs.settings_file()), accepted);
         }
         std::fs::remove_dir_all(app.dirs.config.parent().unwrap()).unwrap();
@@ -17011,6 +17030,7 @@ mod tests {
         assert_eq!(app.locale, Locale::PortugueseBrazil);
         assert!(app.settings_dirty);
         app.save_settings();
+        app.persistence.flush();
         let saved = Settings::load(&app.dirs.settings_file());
         assert_eq!(saved.language, choice);
         let mut restarted = App::new(
@@ -17092,6 +17112,7 @@ mod tests {
         assert_eq!(app.settings.theme, ThemeChoice::System);
         assert!(app.settings.custom_theme.is_none());
         app.save_settings();
+        app.persistence.flush();
         let saved = Settings::load(&app.dirs.settings_file());
         assert_eq!(saved.cached_palette(), Some(theme.palette));
 
@@ -17884,6 +17905,7 @@ mod tests {
             &["spotify:track:b", "spotify:track:ctx1"],
         );
         app.save_session();
+        app.persistence.flush();
 
         let options = AppOptions {
             media_controls: false,
@@ -23289,6 +23311,7 @@ mod tests {
         app.settings.theme = crate::settings::ThemeChoice::Light;
         app.settings.proxy_host = "other.example".into();
         app.save_settings();
+        app.persistence.flush();
         assert_eq!(
             std::fs::read_to_string(app.dirs.settings_file()).unwrap(),
             original
@@ -23298,6 +23321,7 @@ mod tests {
             "do not retry every frame while storage is pending"
         );
         app.handle_proxy_password_stored();
+        app.persistence.flush();
         let saved = Settings::load(&app.dirs.settings_file());
         assert_eq!(saved.theme, crate::settings::ThemeChoice::Light);
         assert_eq!(
@@ -23425,6 +23449,7 @@ mod tests {
         app.settings.proxy_password = "dummy-private-password".into();
         app.settings.theme = ThemeChoice::Light;
         app.save_settings();
+        app.persistence.flush();
         let saved = Settings::load(&app.dirs.settings_file());
         assert_eq!(saved.proxy_mode, crate::settings::ProxyMode::System);
         assert_eq!(saved.theme, ThemeChoice::Light);
@@ -23443,6 +23468,7 @@ mod tests {
         // An acknowledgement for port 8080 arrives after another form edit.
         app.settings.proxy_port = "8090".into();
         app.handle_proxy_applied(request, accepted, Ok(false));
+        app.persistence.flush();
         assert_eq!(
             app.settings.proxy_port, "8090",
             "keep the draft being edited"
@@ -23465,7 +23491,9 @@ mod tests {
         app.request_proxy(false);
         let newest = app.settings.proxy_config().unwrap();
         app.handle_proxy_applied(app.proxy_request, newest.clone(), Ok(false));
+        app.persistence.flush();
         app.handle_proxy_applied(first, old, Ok(false));
+        app.persistence.flush();
         assert_eq!(app.applied_proxy, newest);
         assert_eq!(Settings::load(&app.dirs.settings_file()).proxy_port, "8090");
         app.backend.shutdown();
@@ -24460,6 +24488,7 @@ mod tests {
         }]);
         assert!(app.session_dirty);
         app.save_session();
+        app.persistence.flush();
         drop(app);
 
         let mut restored = App::new(

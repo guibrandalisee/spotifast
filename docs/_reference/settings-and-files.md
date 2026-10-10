@@ -43,6 +43,12 @@ Changes made through Spotify Connect during active playback still update them.
 Older session files remain readable and use the previous defaults for fields
 they do not contain.
 
+Settings and session snapshots are serialized and atomically replaced by a
+single background writer, so disk writes do not block the interface. If more
+changes arrive while a write is running, only the latest pending snapshot for
+each file is kept. Quitting waits for those latest snapshots to finish. File
+formats, paths, and the normal save interval remain unchanged.
+
 The session saves the last song's title, artists, album, duration, artwork URLs,
 and playback position. The existing player bar shows it paused immediately on
 relaunch, including before reconnecting, and reuses artwork already cached on
