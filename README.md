@@ -40,8 +40,11 @@ volume, the equalizer and visualizers use local playback. **Remove download**
 removes that playlist's audio and protected keys.
 
 Offline Play loads the selected song's protected key and checks that audio file's
-integrity before decoding. Other songs are checked when they are selected or
-reach their turn, so starting playback does not scan the entire playlist.
+integrity before decoding. While it plays, one upcoming song is verified and its
+decoder prepared in the background. Changing the next song cancels that work;
+a changed file is checked again before use. Starting playback does not scan the
+entire playlist. Paused offline playback waits for commands, and its queue is
+rebuilt only when the play order changes.
 
 This fork stores encrypted Ogg audio and a complete playlist snapshot in the
 application's durable `state/downloads/` directory, separate from disposable

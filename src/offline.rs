@@ -321,13 +321,29 @@ where
 }
 
 fn verify_audio(path: &Path, entry: &DownloadedTrack) -> Result<()> {
+    verify_audio_checked(path, entry, || Ok(()))
+}
+
+fn verify_audio_checked(
+    path: &Path,
+    entry: &DownloadedTrack,
+    check: impl Fn() -> Result<()>,
+) -> Result<()> {
     let mut file = std::fs::File::open(path)
         .context("Offline audio is missing; download the playlist again")?;
     if file.metadata()?.len() != entry.size {
         bail!("Incomplete offline audio; download the playlist again");
     }
     let mut hash = Sha256::new();
-    std::io::copy(&mut file, &mut hash)?;
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        check()?;
+        let n = file.read(&mut buffer)?;
+        if n == 0 {
+            break;
+        }
+        hash.update(&buffer[..n]);
+    }
     if format!("{:x}", hash.finalize()) != entry.sha256 {
         bail!("Damaged offline audio; download the playlist again");
     }
@@ -728,7 +744,19 @@ pub(crate) struct CarriedTrack {
 
 impl Prepared {
     /// Resolve only the selected song. Unplayed songs must not delay playback.
+    #[cfg(test)]
     async fn source(&self, index: usize) -> Result<(PathBuf, [u8; 16])> {
+        let source = self
+            .verified_source(index, Arc::new(AtomicBool::new(false)))
+            .await?;
+        Ok((source.path, source.key))
+    }
+
+    async fn verified_source(
+        &self,
+        index: usize,
+        cancelled: Arc<AtomicBool>,
+    ) -> Result<VerifiedSource> {
         check(&self.lease)?;
         let (path, key_name) = &self.sources[index];
         let key = self
@@ -739,10 +767,49 @@ impl Prepared {
         let entry = self.manifest.tracks[index].clone();
         let lease = self.lease.clone();
         tokio::task::spawn_blocking(move || {
+            let guard = || {
+                check(&lease)?;
+                if cancelled.load(Ordering::SeqCst) {
+                    bail!("Offline preparation cancelled");
+                }
+                Ok(())
+            };
+            guard()?;
+            let stamp = audio_stamp(&path)?;
+            verify_audio_checked(&path, &entry, guard)?;
+            if audio_stamp(&path)? != stamp {
+                bail!("Offline audio changed during verification");
+            }
+            guard()?;
+            Ok(VerifiedSource { path, key, stamp })
+        })
+        .await?
+    }
+
+    async fn ready(
+        &self,
+        index: usize,
+        normalise: bool,
+        cancelled: Arc<AtomicBool>,
+    ) -> Result<ReadyAudio> {
+        let source = self.verified_source(index, cancelled.clone()).await?;
+        let encoding = self.manifest.tracks[index].encoding;
+        let lease = self.lease.clone();
+        tokio::task::spawn_blocking(move || {
             check(&lease)?;
-            verify_audio(&path, &entry)?;
+            if cancelled.load(Ordering::SeqCst) || !source.unchanged() {
+                bail!("Offline preparation is no longer current");
+            }
+            let (decoder, factor) = decode(&source.path, source.key, normalise, encoding)?;
             check(&lease)?;
-            Ok((path, key))
+            if cancelled.load(Ordering::SeqCst) || !source.unchanged() {
+                bail!("Offline preparation is no longer current");
+            }
+            Ok(ReadyAudio {
+                source,
+                decoder,
+                factor,
+            })
         })
         .await?
     }
@@ -758,6 +825,98 @@ impl Prepared {
         }
         self
     }
+}
+
+fn audio_stamp(path: &Path) -> Result<(u64, std::time::SystemTime)> {
+    let metadata = std::fs::metadata(path)?;
+    Ok((metadata.len(), metadata.modified()?))
+}
+
+struct VerifiedSource {
+    path: PathBuf,
+    key: [u8; 16],
+    stamp: (u64, std::time::SystemTime),
+}
+
+impl VerifiedSource {
+    fn unchanged(&self) -> bool {
+        audio_stamp(&self.path).is_ok_and(|stamp| stamp == self.stamp)
+    }
+}
+
+struct ReadyAudio {
+    source: VerifiedSource,
+    decoder: SymphoniaDecoder,
+    factor: f64,
+}
+
+struct Prefetch {
+    index: usize,
+    cancelled: Arc<AtomicBool>,
+    task: Option<tokio::task::JoinHandle<Result<ReadyAudio>>>,
+}
+
+impl Drop for Prefetch {
+    fn drop(&mut self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+        if let Some(task) = &self.task {
+            task.abort();
+        }
+    }
+}
+
+fn prefetch_next(
+    pending: &mut Option<Prefetch>,
+    index: Option<usize>,
+    prepared: &Arc<Prepared>,
+    runtime: &tokio::runtime::Handle,
+    normalise: bool,
+) {
+    if pending.as_ref().map(|pending| pending.index) == index {
+        return;
+    }
+    pending.take();
+    if let Some(index) = index {
+        let prepared = prepared.clone();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let guard = cancelled.clone();
+        *pending = Some(Prefetch {
+            index,
+            cancelled,
+            task: Some(runtime.spawn(async move { prepared.ready(index, normalise, guard).await })),
+        });
+    }
+}
+
+fn next_decoder(
+    pending: &mut Option<Prefetch>,
+    index: usize,
+    prepared: &Prepared,
+    runtime: &tokio::runtime::Handle,
+    normalise: bool,
+    stop: &AtomicBool,
+) -> Result<(SymphoniaDecoder, f64)> {
+    check(&prepared.lease)?;
+    if stop.load(Ordering::SeqCst) {
+        bail!("Offline playback stopped");
+    }
+    if let Some(mut prefetched) = pending.take()
+        && prefetched.index == index
+        && let Some(task) = prefetched.task.take()
+        && let Ok(Ok(ready)) = runtime.block_on(task)
+    {
+        check(&prepared.lease)?;
+        if !stop.load(Ordering::SeqCst) && ready.source.unchanged() {
+            return Ok((ready.decoder, ready.factor));
+        }
+    }
+    let ready =
+        runtime.block_on(prepared.ready(index, normalise, Arc::new(AtomicBool::new(false))))?;
+    check(&prepared.lease)?;
+    if stop.load(Ordering::SeqCst) {
+        bail!("Offline playback stopped");
+    }
+    Ok((ready.decoder, ready.factor))
 }
 
 pub async fn prepare(dirs: AppDirs, account: String, id: String, lease: Lease) -> Result<Prepared> {
@@ -880,6 +1039,35 @@ struct Order {
     history: Vec<usize>,
 }
 impl Order {
+    fn peek_next(&self, repeat: RepeatMode, natural: bool) -> Option<usize> {
+        if natural && repeat == RepeatMode::Track {
+            return self.current;
+        }
+        self.manual.front().copied().or_else(|| {
+            self.context.get(self.cursor).copied().or_else(|| {
+                (repeat == RepeatMode::Context)
+                    .then(|| self.context.first().copied())
+                    .flatten()
+            })
+        })
+    }
+    fn publish_queue(&self, tracks: &[DownloadedTrack], queue: &Mutex<Queue>, dirty: &mut bool) {
+        if !std::mem::take(dirty) {
+            return;
+        }
+        let item = |index: usize| PlayableItem::Track(tracks[index].track.clone());
+        *queue.lock().unwrap_or_else(|e| e.into_inner()) = Queue {
+            currently_playing: self.current.map(item),
+            queue: self
+                .manual
+                .iter()
+                .copied()
+                .chain(self.context[self.cursor..].iter().copied())
+                .map(item)
+                .collect(),
+        };
+    }
+
     fn next(&mut self, repeat: RepeatMode, natural: bool) -> Option<usize> {
         if natural && repeat == RepeatMode::Track {
             return self.current;
@@ -912,6 +1100,15 @@ pub struct OfflinePlayer {
 enum Control {
     Player(PlayerCommand),
     Queued(tokio::sync::oneshot::Sender<Vec<CarriedTrack>>),
+    Stop,
+}
+
+fn receive_control(receiver: &mpsc::Receiver<Control>, playing: bool) -> Option<Control> {
+    if playing {
+        receiver.try_recv().ok()
+    } else {
+        receiver.recv().ok()
+    }
 }
 impl OfflinePlayer {
     pub fn new(prepared: Prepared, config: EngineConfig, notify: Notify) -> Result<Self> {
@@ -1003,6 +1200,7 @@ impl OfflinePlayer {
     }
     pub fn stop(&self) {
         self.stop.store(true, Ordering::SeqCst);
+        let _ = self.sender.send(Control::Stop);
     }
 }
 impl Drop for OfflinePlayer {
@@ -1020,6 +1218,7 @@ fn run(
     queue: Arc<Mutex<Queue>>,
 ) -> Result<()> {
     let runtime = tokio::runtime::Handle::current();
+    let prepared = Arc::new(prepared);
     let mixer = mixer::find(Some("softvol")).context("Missing audio mixer")?(MixerConfig {
         volume_ctrl: VolumeCtrl::Cubic(VolumeCtrl::DEFAULT_DB_RANGE),
         ..Default::default()
@@ -1051,17 +1250,14 @@ fn run(
     let mut current_decoder: Option<SymphoniaDecoder> = None;
     let mut gain = 1.0;
     let mut announced = Instant::now() - Duration::from_secs(1);
+    let mut queue_dirty = true;
+    let mut prefetched = None;
     while !stop.load(Ordering::SeqCst) {
         let playing = state.lock().unwrap_or_else(|e| e.into_inner()).playback == Playback::Playing;
-        let command = if playing {
-            receiver.try_recv().ok()
-        } else {
-            match receiver.recv_timeout(Duration::from_millis(20)) {
-                Ok(command) => Some(command),
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                Err(mpsc::RecvTimeoutError::Timeout) => None,
-            }
-        };
+        let command = receive_control(&receiver, playing);
+        if matches!(command, Some(Control::Stop)) || (!playing && command.is_none()) {
+            break;
+        }
         let mut load = None;
         let mut seek = None;
         let mut transport = None;
@@ -1083,6 +1279,7 @@ fn run(
             s.error = None;
             match command {
                 PlayerCommand::Load(spec) => {
+                    queue_dirty = true;
                     let list: Vec<usize> = if let Some(uri) = spec
                         .context_uri
                         .as_ref()
@@ -1148,6 +1345,7 @@ fn run(
                     };
                 }
                 PlayerCommand::Next => {
+                    queue_dirty = true;
                     load = order.next(s.repeat, false);
                     s.position_ms = 0;
                 }
@@ -1155,6 +1353,7 @@ fn run(
                     if s.position_ms > 3000 {
                         seek = Some(0);
                     } else if let Some(previous) = order.history.pop() {
+                        queue_dirty = true;
                         if let Some(current) = order.current {
                             order.manual.push_front(current);
                         }
@@ -1178,6 +1377,7 @@ fn run(
                     s.volume = v;
                 }
                 PlayerCommand::Shuffle(value) => {
+                    queue_dirty = true;
                     s.shuffle = value;
                     if value {
                         order.context[order.cursor..].shuffle(&mut rand::rng());
@@ -1186,7 +1386,10 @@ fn run(
                     }
                 }
                 PlayerCommand::Repeat(value) => s.repeat = value,
-                PlayerCommand::ClearQueue => order.manual.clear(),
+                PlayerCommand::ClearQueue => {
+                    queue_dirty |= !order.manual.is_empty();
+                    order.manual.clear();
+                }
                 PlayerCommand::AddToQueue(uri) => {
                     if let Some(index) = prepared
                         .manifest
@@ -1194,6 +1397,7 @@ fn run(
                         .iter()
                         .position(|t| t.track.uri == uri)
                     {
+                        queue_dirty = true;
                         order.manual.push_back(index);
                     } else {
                         s.error = Some("This song is not in the downloaded playlist".into());
@@ -1220,12 +1424,13 @@ fn run(
         if let Some(index) = load {
             audio.interrupt();
             sink.stop()?;
-            let (path, key) = runtime.block_on(prepared.source(index))?;
-            let (mut next, factor) = decode(
-                &path,
-                key,
+            let (mut next, factor) = next_decoder(
+                &mut prefetched,
+                index,
+                &prepared,
+                &runtime,
                 config.normalisation,
-                prepared.manifest.tracks[index].encoding,
+                &stop,
             )?;
             let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
             if s.position_ms != 0 {
@@ -1276,19 +1481,16 @@ fn run(
                 sink.start()?;
             }
         }
+        order.publish_queue(&prepared.manifest.tracks, &queue, &mut queue_dirty);
+        let repeat = state.lock().unwrap_or_else(|e| e.into_inner()).repeat;
+        prefetch_next(
+            &mut prefetched,
+            order.current.and_then(|_| order.peek_next(repeat, true)),
+            &prepared,
+            &runtime,
+            config.normalisation,
+        );
         if announced.elapsed() >= Duration::from_millis(200) {
-            let item =
-                |index: usize| PlayableItem::Track(prepared.manifest.tracks[index].track.clone());
-            *queue.lock().unwrap_or_else(|e| e.into_inner()) = Queue {
-                currently_playing: order.current.map(item),
-                queue: order
-                    .manual
-                    .iter()
-                    .copied()
-                    .chain(order.context[order.cursor..].iter().copied())
-                    .map(item)
-                    .collect(),
-            };
             notify(EngineEvent::State(
                 state.lock().unwrap_or_else(|e| e.into_inner()).clone(),
             ));
@@ -1311,16 +1513,18 @@ fn run(
                     s.position_at = Some(Instant::now());
                 }
                 None => {
+                    queue_dirty = true;
                     let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
                     if let Some(index) = order.next(s.repeat, true) {
                         let uri = prepared.manifest.tracks[index].track.uri.clone();
                         drop(s);
-                        let (path, key) = runtime.block_on(prepared.source(index))?;
-                        let (next, factor) = crate::offline::decode(
-                            &path,
-                            key,
+                        let (next, factor) = next_decoder(
+                            &mut prefetched,
+                            index,
+                            &prepared,
+                            &runtime,
                             config.normalisation,
-                            prepared.manifest.tracks[index].encoding,
+                            &stop,
                         )?;
                         let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
                         current_decoder = Some(next);
@@ -1352,7 +1556,11 @@ fn run(
                         drop(s);
                         sink.stop()?;
                     }
-                    announced = Instant::now() - Duration::from_secs(1);
+                    order.publish_queue(&prepared.manifest.tracks, &queue, &mut queue_dirty);
+                    notify(EngineEvent::State(
+                        state.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+                    ));
+                    announced = Instant::now();
                 }
             }
         }
@@ -1364,6 +1572,248 @@ fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn previewing_the_next_song_preserves_order_and_repeat_rules() {
+        let mut order = Order {
+            context: vec![0, 1],
+            cursor: 1,
+            current: Some(0),
+            manual: VecDeque::from([2, 2]),
+            ..Default::default()
+        };
+        assert_eq!(order.peek_next(RepeatMode::Track, true), Some(0));
+        assert_eq!(order.peek_next(RepeatMode::Track, false), Some(2));
+        assert_eq!(order.peek_next(RepeatMode::Off, true), Some(2));
+        assert_eq!(order.manual, VecDeque::from([2, 2]));
+        assert_eq!(order.cursor, 1);
+        assert!(order.history.is_empty());
+        assert_eq!(order.next(RepeatMode::Off, true), Some(2));
+        assert_eq!(order.peek_next(RepeatMode::Off, true), Some(2));
+        order.manual.clear();
+        order.cursor = 2;
+        assert_eq!(order.peek_next(RepeatMode::Off, true), None);
+        assert_eq!(order.peek_next(RepeatMode::Context, true), Some(0));
+    }
+
+    fn wait_for_prefetch(runtime: &tokio::runtime::Runtime, pending: &Option<Prefetch>) {
+        runtime.block_on(async {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !pending
+                    .as_ref()
+                    .unwrap()
+                    .task
+                    .as_ref()
+                    .unwrap()
+                    .is_finished()
+                {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .unwrap();
+        });
+    }
+
+    #[test]
+    fn prefetch_reuses_a_ready_decoder_but_rejects_changed_files_and_sign_out() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let (dirs, manifest, path, key) = fixture();
+        let store = crate::credentials::Store::in_memory(dirs.clone());
+        let lease = store.lease(crate::credentials::Slot::Playback);
+        runtime
+            .block_on(lease.save_audio_key(
+                "alice".into(),
+                key_id("mix", &manifest.tracks[0].file),
+                key,
+            ))
+            .unwrap();
+        let prepared = Arc::new(
+            runtime
+                .block_on(prepare(dirs.clone(), "alice".into(), "mix".into(), lease))
+                .unwrap(),
+        );
+        let mut pending = None;
+        let stopped = AtomicBool::new(false);
+        prefetch_next(&mut pending, Some(0), &prepared, runtime.handle(), false);
+        let guard = pending.as_ref().unwrap().cancelled.clone();
+        prefetch_next(&mut pending, Some(0), &prepared, runtime.handle(), false);
+        assert!(Arc::ptr_eq(&guard, &pending.as_ref().unwrap().cancelled));
+        wait_for_prefetch(&runtime, &pending);
+        let (mut decoder, _) = next_decoder(
+            &mut pending,
+            0,
+            &prepared,
+            runtime.handle(),
+            false,
+            &stopped,
+        )
+        .unwrap();
+        assert!(decoder.next_packet().unwrap().is_some());
+        drop(decoder);
+        assert!(pending.is_none());
+        prefetch_next(&mut pending, Some(0), &prepared, runtime.handle(), false);
+        wait_for_prefetch(&runtime, &pending);
+        let original = std::fs::read(&path).unwrap();
+        std::fs::write(&path, [1]).unwrap();
+        assert!(
+            next_decoder(
+                &mut pending,
+                0,
+                &prepared,
+                runtime.handle(),
+                false,
+                &stopped
+            )
+            .is_err()
+        );
+        std::fs::write(&path, original).unwrap();
+        prefetch_next(&mut pending, Some(0), &prepared, runtime.handle(), false);
+        wait_for_prefetch(&runtime, &pending);
+        store.invalidate(crate::credentials::Slot::Playback);
+        assert!(
+            next_decoder(
+                &mut pending,
+                0,
+                &prepared,
+                runtime.handle(),
+                false,
+                &stopped
+            )
+            .is_err()
+        );
+        drop(pending);
+        std::fs::remove_dir_all(dirs.state.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn cancelled_or_failed_prefetch_does_not_replace_the_selected_song() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let (dirs, mut manifest, _, key) = fixture();
+        let store = crate::credentials::Store::in_memory(dirs.clone());
+        let lease = store.lease(crate::credentials::Slot::Playback);
+        runtime
+            .block_on(lease.save_audio_key(
+                "alice".into(),
+                key_id("mix", &manifest.tracks[0].file),
+                key,
+            ))
+            .unwrap();
+        let mut missing = manifest.tracks[0].clone();
+        missing.file = "b".repeat(40);
+        manifest.tracks.push(missing);
+        manifest.total = 2;
+        runtime
+            .block_on(checkpoint(&dirs, &lease, &manifest))
+            .unwrap();
+        let prepared = Arc::new(
+            runtime
+                .block_on(prepare(dirs.clone(), "alice".into(), "mix".into(), lease))
+                .unwrap(),
+        );
+        let mut pending = None;
+        prefetch_next(&mut pending, Some(1), &prepared, runtime.handle(), false);
+        wait_for_prefetch(&runtime, &pending);
+        let (mut decoder, _) = next_decoder(
+            &mut pending,
+            0,
+            &prepared,
+            runtime.handle(),
+            false,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert!(decoder.next_packet().unwrap().is_some());
+        drop(decoder);
+        prefetch_next(&mut pending, Some(1), &prepared, runtime.handle(), false);
+        let cancelled = pending.as_ref().unwrap().cancelled.clone();
+        prefetch_next(&mut pending, None, &prepared, runtime.handle(), false);
+        assert!(cancelled.load(Ordering::SeqCst));
+        assert!(pending.is_none());
+        assert!(
+            next_decoder(
+                &mut pending,
+                0,
+                &prepared,
+                runtime.handle(),
+                false,
+                &AtomicBool::new(true)
+            )
+            .is_err()
+        );
+        // Drain any cancelled blocking work before removing the fixture.
+        drop(runtime);
+        std::fs::remove_dir_all(dirs.state.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn unchanged_queue_keeps_its_snapshot_and_changes_preserve_duplicates() {
+        let (dirs, manifest, _, _) = fixture();
+        let queue = Mutex::new(Queue::default());
+        let mut order = Order {
+            context: vec![0, 0],
+            cursor: 1,
+            current: Some(0),
+            manual: VecDeque::from([0, 0]),
+            ..Default::default()
+        };
+        let mut dirty = true;
+        order.publish_queue(&manifest.tracks, &queue, &mut dirty);
+        let snapshot = queue.lock().unwrap();
+        assert_eq!(snapshot.queue.len(), 3);
+        let pointer = snapshot.queue.as_ptr();
+        drop(snapshot);
+        for _ in 0..100 {
+            order.publish_queue(&manifest.tracks, &queue, &mut dirty);
+        }
+        assert_eq!(queue.lock().unwrap().queue.as_ptr(), pointer);
+        order.next(RepeatMode::Off, false);
+        dirty = true;
+        order.publish_queue(&manifest.tracks, &queue, &mut dirty);
+        assert_eq!(queue.lock().unwrap().queue.len(), 2);
+        order.manual.clear();
+        order.current = None;
+        order.cursor = order.context.len();
+        dirty = true;
+        order.publish_queue(&manifest.tracks, &queue, &mut dirty);
+        assert!(queue.lock().unwrap().currently_playing.is_none());
+        assert!(queue.lock().unwrap().queue.is_empty());
+        std::fs::remove_dir_all(dirs.state.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn paused_control_waits_for_a_command_and_stop_wakes_it() {
+        let (sender, receiver) = mpsc::channel();
+        let (started, waiting) = mpsc::channel();
+        let (finished, result) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            started.send(()).unwrap();
+            let command = receive_control(&receiver, false);
+            finished
+                .send(matches!(command, Some(Control::Stop)))
+                .unwrap();
+        });
+        waiting.recv().unwrap();
+        assert!(matches!(
+            result.recv_timeout(Duration::from_millis(80)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        let player = OfflinePlayer {
+            sender,
+            stop: Arc::new(AtomicBool::new(false)),
+            queue: Arc::new(Mutex::new(Queue::default())),
+            playlist_uri: String::new(),
+            uris: Vec::new(),
+        };
+        player.stop();
+        assert!(player.stop.load(Ordering::SeqCst));
+        assert!(result.recv_timeout(Duration::from_secs(2)).unwrap());
+        worker.join().unwrap();
+        let (sender, receiver) = mpsc::channel();
+        assert!(receive_control(&receiver, true).is_none());
+        drop(sender);
+        assert!(receive_control(&receiver, false).is_none());
+    }
     #[tokio::test]
     async fn empty_original_files_resolve_an_available_alternative() {
         let (dirs, _, _, _) = fixture();

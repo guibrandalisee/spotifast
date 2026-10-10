@@ -355,13 +355,22 @@ to JSON or logs. Repeated songs remain repeated in playback order.
 
 Offline playback loads the local playlist metadata, then retrieves only the
 selected song's protected key and verifies its audio size and SHA-256 before
-decoding. Each later song goes through the same checks when selected or when its
-turn arrives, including manually queued songs carried from another playlist.
-Unplayed files and keys do not delay startup. This starts a local decoder without authenticating a Spotify session
-or registering a Connect device. It uses the normal output, EQ, visualizers and
+decoding. While it plays, one upcoming song goes through these checks and decoder
+setup in the background, including manually queued songs carried from another
+playlist. Changing the next song cancels the old preparation. Prefetched audio
+is discarded if its file size or modification time changes, and sign-out prevents
+its use. A preparation failure is handled only if that song is selected; it does
+not interrupt the current song. Unplayed files and keys do not delay startup.
+This starts a local decoder without authenticating a Spotify session or
+registering a Connect device. It uses the normal output, EQ, visualizers and
 volume path. Connect playback is stopped when offline playback starts. Offline
 queue reads are answered locally, and delayed Spotify playback responses cannot
 replace the displayed local state. Offline listens are not sent to Spotify.
+
+The offline player rebuilds its queue snapshot only when its order or current
+song changes; position reports do not copy the remaining playlist. While paused
+or stopped it waits for commands without a periodic wakeup. Commands, including
+shutdown, wake it immediately.
 
 Downloads do not implement the official Spotify offline-license protocol or its
 renewal rules. They require the original account's retained sign-in state and an
