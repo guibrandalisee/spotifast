@@ -2326,6 +2326,9 @@ impl App {
     fn handle_auth(&mut self, status: AuthStatus) {
         match &status {
             AuthStatus::Connected { .. } => {
+                // Page loaders must observe the new connection, not the old
+                // Starting/Connecting state, when restoring the selected page.
+                self.auth = status.clone();
                 self.sign_in_url = None;
                 if !self.offline_playing {
                     self.reset_data();
@@ -12396,6 +12399,77 @@ mod tests {
         });
         assert_eq!(listed_playlists(&app), playlist_ids(&["old"]));
         assert!(app.library.playlists_refresh.is_none());
+    }
+
+    #[test]
+    fn connecting_starts_the_restored_playlist_without_waiting_for_another_page() {
+        for (saved_library, cached_rows) in [(false, false), (true, false), (true, true)] {
+            let mut app = headless_app();
+            app.backend.set_offline(true);
+            app.auth = AuthStatus::Connecting;
+            let user = User {
+                id: "alice".into(),
+                ..Default::default()
+            };
+            if saved_library {
+                app.offline_library = Some(crate::offline_library::Cache::new(
+                    user.clone(),
+                    playlist_page(&["mix"], 0, 1).items,
+                ));
+                app.offline_playlist_id = Some("mix".into());
+            }
+            if cached_rows {
+                app.offline_playlist = Some(PlaylistCache {
+                    snapshot: "saved".into(),
+                    items: vec![PlaylistItem::default()],
+                    total: 1,
+                    next_offset: None,
+                    appendable: false,
+                });
+            }
+            app.history = vec![Page::Playlist("mix".into())];
+            app.history_index = 0;
+            app.hydrate_saved_library();
+            app.handle_auth(AuthStatus::Connected {
+                username: "alice".into(),
+            });
+            let requests = app.backend.take_playlist_item_requests();
+            assert_eq!(
+                requests.len(),
+                1,
+                "The restored page must start on connection"
+            );
+            assert_eq!(requests[0].0, "mix");
+            assert_eq!(requests[0].1, 0);
+            assert_ne!(requests[0].2, 0);
+            assert!(app.playlist_pages["mix"].items.loading);
+            if cached_rows {
+                assert_eq!(app.playlist_pages["mix"].items.items.len(), 1);
+            }
+            // A first frame can ask for rows before the profile event arrives.
+            // It must not start an old-generation request that leaves loading
+            // set after the restored page receives its generation.
+            app.load_more(Page::Playlist("mix".into()));
+            app.handle_api(ApiResponse::Me(Ok(user)));
+            assert!(
+                app.backend.take_playlist_item_requests().is_empty(),
+                "Profile arrival must not duplicate the request"
+            );
+            app.handle_api(ApiResponse::PlaylistItems {
+                id: "mix".into(),
+                offset: 0,
+                generation: requests[0].2,
+                result: Ok(ApiPage {
+                    items: vec![PlaylistItem::default()],
+                    total: 1,
+                    ..Default::default()
+                }),
+            });
+            assert!(!app.playlist_pages["mix"].items.loading);
+            assert_eq!(app.playlist_pages["mix"].items.items.len(), 1);
+            assert_eq!(app.page(), &Page::Playlist("mix".into()));
+            app.backend.shutdown();
+        }
     }
 
     #[test]
