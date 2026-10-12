@@ -661,6 +661,8 @@ pub struct SearchState {
 #[derive(Default)]
 pub struct PlaylistPage {
     pub generation: u64,
+    /// Offline reads belong to this page, including the remembered play context.
+    pub saved_cache_requested: bool,
     /// Cached rows displayed until the live playlist request completes.
     pub needs_live_refresh: bool,
     /// Generation that produced the rows, which may lag during refresh.

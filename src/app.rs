@@ -1177,6 +1177,10 @@ impl App {
     }
 
     fn seed_saved_playlist(&mut self, id: &str) {
+        self.seed_saved_playlist_with_rows(id, None);
+    }
+
+    fn seed_saved_playlist_with_rows(&mut self, id: &str, cache: Option<&PlaylistCache>) {
         let Some(library) = &self.offline_library else {
             return;
         };
@@ -1196,8 +1200,11 @@ impl App {
             page.playlist = Loadable::Loaded(listed.clone());
         }
         if !page.items.loaded_once
-            && self.offline_playlist_id.as_deref() == Some(id)
-            && let Some(cache) = &self.offline_playlist
+            && let Some(cache) = cache.or_else(|| {
+                (self.offline_playlist_id.as_deref() == Some(id))
+                    .then_some(self.offline_playlist.as_ref())
+                    .flatten()
+            })
         {
             let live_request_in_flight = connected && page.generation != 0;
             page.items
@@ -1216,15 +1223,41 @@ impl App {
         if !library.playlists.iter().any(|playlist| playlist.id == id) {
             return;
         }
-        if self.offline_playlist_id.as_deref() != Some(id) {
+        let account_id = library.user.id.clone();
+        if self.page() == &Page::Playlist(id.to_string())
+            && self.offline_playlist_id.as_deref() != Some(id)
+        {
             self.offline_playlist_id = Some(id.to_string());
             self.offline_playlist = None;
+        }
+        self.seed_saved_playlist(id);
+        let Some(page) = self.playlist_pages.get_mut(id) else {
+            return;
+        };
+        if !page.saved_cache_requested {
+            page.saved_cache_requested = true;
             self.backend.send(Command::LoadOfflinePlaylist {
-                account_id: library.user.id.clone(),
+                account_id,
                 id: id.to_string(),
             });
         }
-        self.seed_saved_playlist(id);
+    }
+
+    fn receive_saved_playlist(&mut self, account_id: &str, id: &str, cache: Option<PlaylistCache>) {
+        if !self
+            .offline_library
+            .as_ref()
+            .is_some_and(|library| library.user.id == account_id)
+        {
+            return;
+        }
+        if !self.playlist_pages.contains_key(id) {
+            return;
+        }
+        if self.offline_playlist_id.as_deref() == Some(id) {
+            self.offline_playlist = cache.clone();
+        }
+        self.seed_saved_playlist_with_rows(id, cache.as_ref());
     }
 
     /// The library list's entry for a playlist, when it holds one.
@@ -2117,15 +2150,7 @@ impl App {
                     id,
                     cache,
                 } => {
-                    if self
-                        .offline_library
-                        .as_ref()
-                        .is_some_and(|library| library.user.id == account_id)
-                        && self.offline_playlist_id.as_deref() == Some(id.as_str())
-                    {
-                        self.offline_playlist = cache;
-                        self.seed_saved_playlist(&id);
-                    }
+                    self.receive_saved_playlist(&account_id, &id, cache);
                 }
                 Event::Playback(status) => self.handle_playback(status),
                 Event::Receivers(receivers) => self.receivers = receivers,
@@ -12399,6 +12424,50 @@ mod tests {
         });
         assert_eq!(listed_playlists(&app), playlist_ids(&["old"]));
         assert!(app.library.playlists_refresh.is_none());
+    }
+
+    #[test]
+    fn restored_page_and_remembered_context_receive_independent_offline_rows() {
+        for order in [["visible", "playing"], ["playing", "visible"]] {
+            let mut app = headless_app();
+            app.backend.set_offline(true);
+            app.auth = AuthStatus::Connecting;
+            app.history = vec![Page::Playlist("visible".into())];
+            app.history_index = 0;
+            app.offline_library = Some(crate::offline_library::Cache::new(
+                User {
+                    id: "alice".into(),
+                    ..Default::default()
+                },
+                playlist_page(&["visible", "playing"], 0, 2).items,
+            ));
+            app.hydrate_saved_library();
+            app.ensure_loaded(app.page().clone());
+            app.resume_track = Some("spotify:track:remembered".into());
+            app.resume_context = Some("spotify:playlist:playing".into());
+            app.ensure_resume_context_loaded();
+            assert!(app.playlist_pages["playing"].saved_cache_requested);
+            assert_eq!(app.offline_playlist_id.as_deref(), Some("visible"));
+            let cache = || PlaylistCache {
+                snapshot: "saved".into(),
+                items: vec![PlaylistItem::default()],
+                total: 1,
+                next_offset: None,
+                appendable: false,
+            };
+            app.receive_saved_playlist("bob", "visible", Some(cache()));
+            assert!(app.playlist_pages["visible"].items.items.is_empty());
+            for id in order {
+                app.receive_saved_playlist("alice", id, Some(cache()));
+                assert_eq!(app.playlist_pages[id].items.items.len(), 1);
+                assert!(!app.playlist_pages[id].items.loading);
+            }
+            assert_eq!(app.page(), &Page::Playlist("visible".into()));
+            assert_eq!(app.offline_playlist_id.as_deref(), Some("visible"));
+            assert!(app.backend.take_playlist_item_requests().is_empty());
+            app.ensure_resume_context_loaded();
+            app.backend.shutdown();
+        }
     }
 
     #[test]

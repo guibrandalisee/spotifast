@@ -31,6 +31,9 @@ Normal Web API playlist loading resumes after verification.
 The restored page starts its live loading as soon as the verified connection is
 reported, without waiting for navigation or the profile event. The later profile
 event does not duplicate a playlist's in-flight song request.
+Offline rows are restored independently for the selected playlist and the
+remembered playback context. Either disk read may finish first, including while
+Spotify's sign-in verification is waiting to retry.
 The protected Web API grant remembers its verified account ID so a refreshed
 token still opens only that account's cache. Older grants gain this field on
 their next successful online verification.
