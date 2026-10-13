@@ -4,42 +4,29 @@ description: What Spotify's Web API and librespot provide, and what neither supp
 nav_order: 3
 ---
 
-Spotifast uses Spotify's
-[Web API](https://developer.spotify.com/documentation/web-api) for account and
-catalogue data. It uses [librespot](https://github.com/librespot-org/librespot)
-for a few extra details and for audio playback.
+This personal fork uses a custom client for Spotify native account, catalogue,
+playlist and Connect services. Audio playback still uses
+[librespot](https://github.com/librespot-org/librespot).
+The production transport blocks Web API calls and does not use a developer
+application's quota. Native services can still return rate limits.
 
-Features missing from both cannot be added to Spotifast. They may become
-possible if Spotify adds an API or librespot adds lawful support.
+## Native data and controls
 
-## Web API
+- **Account and library:** profile, followed artists, top content, saved tracks,
+  albums, shows, episodes and playlists; saving and removing library items.
+- **Playlists:** metadata, contents, creation, name, description, visibility,
+  adding/removing/reordering tracks, following and unfollowing, and cover uploads.
+- **Catalogue:** search, albums, artists, tracks, shows, episodes, artist top
+  tracks, discography and related artists.
+- **Connect:** devices, transfer, play/pause, skips, seek, shuffle, repeat,
+  volume, queue reads and queue appends.
 
-Spotifast uses the Web API for:
-
-- **Account:** profile details, followed artists, top artists and tracks, and
-  the last fifty plays. Spotifast keeps a longer local
-  [history](/using-spotifast/#recent).
-- **Library:** playlists, saved tracks, albums, shows, and episodes. It can
-  also save and remove items.
-- **Playlists:** reading, creating, renaming, changing the description and
-  visibility, adding and removing songs, reordering songs, and following and
-  unfollowing. Custom playlist cover uploads are available since 0.9.0.
-- **Catalogue:** albums, artists, tracks, shows, episodes, search, and
-  recommendations. Artist pages include top tracks, releases, and related
-  artists.
-- **Playback control:** listing devices, transferring playback, play, pause,
-  next, previous, seek, shuffle, repeat, volume, and reading or adding to the
-  queue.
-
-Users of the default app share Spotify's quota. Spotifast limits heavy
-requests and pauses a session when Spotify sends a `Retry-After` response.
-
-Spotify also limits apps created since November 2024. These apps cannot access
-Spotify-owned playlists, related artists, recommendations, or audio features.
-This is why a personal app cannot handle every request. Complete playlist
-library views stay on the shared app. Playlists other people own, and every
-playlist when there is no personal app, are read over the librespot session
-while local playback is signed in. See [How It Connects](/how-it-connects/).
+Native Recent returns the last track per recently played context, rather than
+fifty consecutive individual plays. Local history still records playback events.
+Native radio recommendations use the first supplied track or artist seed.
+Popularity and ISRC are not supplied by these native catalogue queries.
+Persisted operations can change upstream and require an update; errors do not
+silently fall back to Web API access. See [How It Connects](/how-it-connects/).
 
 ## librespot session
 
@@ -51,18 +38,8 @@ clients. Spotifast uses its session for:
 - **Playlist permissions.** The rootlist shows when a playlist shared by
   invitation can be edited. The Web API's `collaborative` flag does not cover
   these playlists. Spotifast cannot manage collaborators.
-- **Playlists the shared app would otherwise serve.** Title, cover, and
-  songs of other people's playlists, and of the account's own when there is
-  no personal app, so they open without the shared app's quota. Whether a
-  playlist is public, the owner's name when the session gives none, and the
-  mosaic of a playlist without a cover of its own, come from the Web API's
-  library list. These rows carry
-  no per-market availability flag. A song the Web API had already greyed
-  out, on an earlier page or in the cache of an earlier visit, stays greyed
-  out when the session reads the rows. This knowledge belongs to the signed-in
-  account, and a newer Web API answer takes precedence over an older disk
-  cache. A song the session reads first has unknown availability; if it cannot
-  play, it is skipped when reached, as it would be anywhere else.
+- **Playlist rootlists, folders and invitation permissions.** Catalogue and
+  playlist contents now use the custom native transport.
 - **Lyrics** when Spotify has them.
 - **Display names** for the user IDs attached to songs in a playlist.
 - **Precise EP types** for releases that the Web API groups with singles.

@@ -264,6 +264,27 @@ pub enum PlaybackResume {
 }
 
 impl LoadSpec {
+    /// Prepare the exact starting song while Connect resolves its context.
+    /// The player reuses this loader without changing the playing song.
+    fn preload_uri(&self) -> Option<SpotifyUri> {
+        if !self.play || self.position_ms != 0 || self.autoplay {
+            return None;
+        }
+        let uri = self.offset_uri.as_deref().or_else(|| {
+            if let Some(context) = self.context_uri.as_deref() {
+                Some(context)
+            } else if self.shuffle == Some(true) && self.offset_index.is_none() {
+                None
+            } else {
+                self.uris
+                    .get(self.offset_index.unwrap_or(0) as usize)
+                    .map(String::as_str)
+            }
+        })?;
+        let uri = SpotifyUri::from_uri(uri).ok()?;
+        matches!(uri, SpotifyUri::Track { .. } | SpotifyUri::Episode { .. }).then_some(uri)
+    }
+
     fn context_options(&self, current_repeat: RepeatMode) -> LoadContextOptions {
         if self.autoplay {
             LoadContextOptions::Autoplay
@@ -588,7 +609,28 @@ impl Engine {
         }
     }
 
+    pub fn prepare_while_idle(&self, uri: &str) {
+        let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        if !idle_preload_allowed(&state) {
+            return;
+        }
+        let Ok(uri) = SpotifyUri::from_uri(uri) else {
+            return;
+        };
+        if matches!(uri, SpotifyUri::Track { .. } | SpotifyUri::Episode { .. }) {
+            self.player.preload(uri);
+        }
+    }
+
     pub fn command(&self, command: PlayerCommand) -> Result<()> {
+        if let PlayerCommand::Load(spec) = &command {
+            self.audio.begin_load();
+            if let Some(uri) = spec.preload_uri() {
+                // Overlap metadata/key/audio work with the fade and Spirc's
+                // awaited activation/context requests instead of serializing.
+                self.player.preload(uri);
+            }
+        }
         let interrupts_audio = command_interrupts_audio(
             &self.state.lock().unwrap_or_else(|p| p.into_inner()),
             &command,
@@ -659,6 +701,10 @@ impl Engine {
         }
         Ok(())
     }
+}
+
+fn idle_preload_allowed(state: &LocalState) -> bool {
+    state.connected && state.playback == Playback::Stopped && !state.loading
 }
 
 fn command_interrupts_audio(state: &LocalState, command: &PlayerCommand) -> bool {
@@ -1144,6 +1190,56 @@ fn decode_folder_name(encoded: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn idle_preparation_cannot_replace_an_active_or_loading_tracks_preload() {
+        let mut state = LocalState {
+            connected: true,
+            ..Default::default()
+        };
+        assert!(idle_preload_allowed(&state));
+        state.loading = true;
+        assert!(!idle_preload_allowed(&state));
+        state.loading = false;
+        for playback in [Playback::Playing, Playback::Paused] {
+            state.playback = playback;
+            assert!(!idle_preload_allowed(&state));
+        }
+        state.playback = Playback::Stopped;
+        state.connected = false;
+        assert!(!idle_preload_allowed(&state));
+    }
+
+    #[test]
+    fn preload_follows_the_selected_song_without_guessing_a_collection_start() {
+        let first = "spotify:track:0000000000000000000001";
+        let selected = "spotify:track:0000000000000000000002";
+        let mut spec = LoadSpec {
+            context_uri: Some("spotify:playlist:0000000000000000000003".into()),
+            offset_uri: Some(selected.into()),
+            play: true,
+            ..Default::default()
+        };
+        assert_eq!(spec.preload_uri(), SpotifyUri::from_uri(selected).ok());
+        spec.offset_uri = None;
+        assert_eq!(spec.preload_uri(), None);
+        spec.context_uri = None;
+        spec.uris = vec![first.into(), selected.into()];
+        spec.offset_index = Some(1);
+        assert_eq!(spec.preload_uri(), SpotifyUri::from_uri(selected).ok());
+        spec.offset_index = Some(2);
+        assert_eq!(spec.preload_uri(), None);
+        spec.offset_index = None;
+        spec.shuffle = Some(true);
+        assert_eq!(spec.preload_uri(), None);
+        spec.shuffle = Some(false);
+        assert_eq!(spec.preload_uri(), SpotifyUri::from_uri(first).ok());
+        spec.position_ms = 10_000;
+        assert_eq!(spec.preload_uri(), None);
+        spec.position_ms = 0;
+        spec.play = false;
+        assert_eq!(spec.preload_uri(), None);
+    }
+
     #[test]
     fn loading_another_song_keeps_repeat_with_or_without_shuffle() {
         for shuffle in [None, Some(false), Some(true)] {

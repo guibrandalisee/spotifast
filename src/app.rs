@@ -1380,13 +1380,19 @@ impl App {
         {
             return Target::Remote(Some(selected.clone()));
         }
-        if let Some(remote) = self.remote_fresh() {
-            let device = remote.state.device.as_ref();
-            let is_local = device
+        if let Some(remote) = self.remote_fresh()
+            && let Some(id) = remote
+                .state
+                .device
+                .as_ref()
                 .and_then(|device| device.id.as_deref())
-                .is_some_and(|id| Some(id) == self.local_device_id.as_deref());
+                .filter(|id| !id.is_empty())
+        {
+            // A remembered song without a device is not a remote player.
+            // Prefer the ready local engine instead of opening the device picker.
+            let is_local = Some(id) == self.local_device_id.as_deref();
             if !is_local && (remote.state.is_playing || remote.state.item.is_some()) {
-                return Target::Remote(device.and_then(|device| device.id.clone()));
+                return Target::Remote(Some(id.to_owned()));
             }
         }
         if self.local_ready {
@@ -2351,6 +2357,11 @@ impl App {
     fn handle_auth(&mut self, status: AuthStatus) {
         match &status {
             AuthStatus::Connected { .. } => {
+                // Native services do not use a developer application's quota.
+                if !self.settings.personal_app_intro_seen {
+                    self.settings.personal_app_intro_seen = true;
+                    self.settings_dirty = true;
+                }
                 // Page loaders must observe the new connection, not the old
                 // Starting/Connecting state, when restoring the selected page.
                 self.auth = status.clone();
@@ -2409,6 +2420,8 @@ impl App {
                 self.local_ready = true;
                 if let Some(request) = self.queued_play.take() {
                     self.play_request(request, false);
+                } else if let Some(uri) = &self.resume_track {
+                    self.backend.send(Command::PreparePlayback(uri.clone()));
                 }
             }
             LocalPlayback::Unavailable => {
@@ -7394,6 +7407,7 @@ impl App {
                 self.repeat_set_at = Some(Instant::now());
                 self.local_list = load.context_uri.is_none().then(|| load.uris.clone());
                 let shuffle_after = shuffle && load.shuffle.is_none() && !load.uris.is_empty();
+                log::info!("Playback request routed to the connected local player");
                 self.backend.player(PlayerCommand::Load(load));
                 if shuffle_after {
                     self.backend.player(PlayerCommand::Shuffle(true));
@@ -7403,6 +7417,7 @@ impl App {
             Target::Remote(Some(device_id)) => {
                 self.queued_play = None;
                 self.repeat_set_at = Some(Instant::now());
+                log::info!("Playback request routed to a remote Connect device");
                 if shuffle || own_shuffle {
                     self.backend.api(ApiRequest::ShufflePlay {
                         device_id: Some(device_id),
@@ -7436,8 +7451,14 @@ impl App {
                 ) || (self.settings.playback_authorized
                     && matches!(self.auth, AuthStatus::Starting | AuthStatus::Connecting))
                 {
+                    log::info!("Playback request waiting for the local player to connect");
                     self.queued_play = Some(request);
                 } else {
+                    log::warn!(
+                        "Playback request needs a device: local_ready={}, local_connected={}",
+                        self.local_ready,
+                        self.local.connected
+                    );
                     self.queue_start_pending = None;
                     self.clear_play_pending();
                     self.queued_play = None;
@@ -10250,24 +10271,11 @@ impl App {
     }
 
     fn maybe_suggest_personal_app(&mut self) {
-        if self.settings.personal_app_intro_seen
-            || self
-                .settings
-                .web_client_id
-                .as_deref()
-                .is_some_and(|id| !id.trim().is_empty())
-            || self.web_app.is_some()
-            || !self.is_connected()
-            || self.offline
-            || self.user.as_ref().and_then(|user| user.product.as_deref()) != Some("premium")
-            || self.dialog.is_some()
-            || self.show_devices
-            || self.settings.winamp_window
-            || self.page() == &Page::Settings
-        {
-            return;
+        // Retire the legacy quota prompt even when old settings are restored.
+        if self.is_connected() && !self.settings.personal_app_intro_seen {
+            self.settings.personal_app_intro_seen = true;
+            self.settings_dirty = true;
         }
-        self.dialog = Some(Dialog::PersonalAppIntro);
     }
 
     /// Selected row indices for `page`.
@@ -17447,7 +17455,7 @@ mod tests {
     }
 
     #[test]
-    fn premium_listeners_discover_personal_apps_before_requests_slow_down() {
+    fn native_sessions_retire_the_personal_app_prompt_and_persist_it() {
         let mut app = test_app("personal-app-intro");
         app.auth = AuthStatus::Connected {
             username: "listener".into(),
@@ -17459,8 +17467,9 @@ mod tests {
         // Having seen an old transient toast does not count as seeing the intro.
         app.settings.personal_app_nudge_at = Some("2026-09-09T10:00:00Z".into());
         app.maybe_suggest_personal_app();
-        assert!(matches!(app.dialog, Some(Dialog::PersonalAppIntro)));
-        assert!(!app.settings.personal_app_intro_seen);
+        assert!(app.dialog.is_none());
+        assert!(app.settings.personal_app_intro_seen);
+        assert!(app.settings_dirty);
         app.actions.push(Action::CloseDialog);
         app.apply_actions(&egui::Context::default());
         assert!(app.settings.personal_app_intro_seen);
@@ -17476,7 +17485,7 @@ mod tests {
     }
 
     #[test]
-    fn personal_app_intro_waits_for_a_premium_account_using_shared_access() {
+    fn native_accounts_never_suggest_a_developer_app() {
         let mut app = test_app("personal-app-intro-eligibility");
         app.auth = AuthStatus::Connected {
             username: "listener".into(),
@@ -17513,7 +17522,7 @@ mod tests {
     }
 
     #[test]
-    fn personal_app_intro_defers_while_another_surface_is_in_use() {
+    fn retiring_the_quota_prompt_preserves_existing_dialogs() {
         let mut app = test_app("personal-app-intro-defer");
         app.auth = AuthStatus::Connected {
             username: "listener".into(),
@@ -17539,10 +17548,10 @@ mod tests {
         assert!(app.dialog.is_none());
         app.open(Page::Home);
         app.maybe_suggest_personal_app();
-        assert!(matches!(app.dialog, Some(Dialog::PersonalAppIntro)));
+        assert!(app.dialog.is_none());
         app.handle_auth(AuthStatus::SignedOut);
         assert!(app.dialog.is_none());
-        assert!(!app.settings.personal_app_intro_seen);
+        assert!(app.settings.personal_app_intro_seen);
     }
 
     fn play(uri: &str, at: &str) -> crate::api::models::PlayHistory {
@@ -22763,6 +22772,72 @@ mod tests {
             .1;
         assert_eq!(shuffle_node.toggled(), Some(Toggled::False));
         assert!(app.backend.take_remote_shuffle_requests().is_empty());
+        app.backend.shutdown();
+    }
+
+    #[test]
+    fn remembered_remote_song_without_a_device_plays_the_clicked_song_locally() {
+        for missing_device in [true, false] {
+            for missing_id in [true, false] {
+                let mut app = headless_app();
+                crate::demo::populate(&mut app);
+                app.local_ready = true;
+                app.local_playback = LocalPlayback::Ready {
+                    device_id: "local".into(),
+                };
+                app.local.connected = true;
+                app.local.playback = Playback::Stopped;
+                app.selected_device = None;
+                let state = &mut app.remote.as_mut().unwrap().state;
+                state.is_playing = false;
+                assert!(state.item.is_some(), "Spotify retains the previous song");
+                if missing_device {
+                    state.device = None;
+                } else {
+                    state.device.as_mut().unwrap().id = (!missing_id).then(String::new);
+                }
+                assert!(matches!(app.target(), Target::Local));
+                app.track_cache.insert(
+                    "chosen".into(),
+                    Track {
+                        id: Some("chosen".into()),
+                        uri: "spotify:track:chosen".into(),
+                        name: "Chosen song".into(),
+                        ..Default::default()
+                    },
+                );
+                app.backend.take_player_commands();
+                app.play_request(
+                    PlayRequest::context("spotify:playlist:chosen")
+                        .starting_at_uri("spotify:track:chosen"),
+                    false,
+                );
+                let commands = app.backend.take_player_commands();
+                assert!(matches!(commands.as_slice(), [PlayerCommand::Load(load)]
+                    if load.context_uri.as_deref() == Some("spotify:playlist:chosen")
+                    && load.offset_uri.as_deref() == Some("spotify:track:chosen")));
+                assert!(!app.show_devices);
+                assert!(app.backend.take_remote_play_requests().is_empty());
+                assert_eq!(
+                    app.intent_track.as_ref().map(|intent| intent.uri.as_str()),
+                    Some("spotify:track:chosen")
+                );
+                assert_eq!(app.now_playing().unwrap().uri, "spotify:track:chosen");
+                app.backend.shutdown();
+            }
+        }
+    }
+
+    #[test]
+    fn a_paused_remote_device_keeps_its_target_when_local_playback_is_ready() {
+        let mut app = headless_app();
+        crate::demo::populate(&mut app);
+        app.local_ready = true;
+        app.local.connected = true;
+        app.local.playback = Playback::Stopped;
+        app.selected_device = None;
+        app.remote.as_mut().unwrap().state.is_playing = false;
+        assert!(matches!(app.target(), Target::Remote(Some(id)) if id == "remote1"));
         app.backend.shutdown();
     }
 

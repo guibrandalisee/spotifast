@@ -27,6 +27,27 @@ Spotifast is a Spotify client written in Rust with
 **Playback needs Spotify Premium.** Free accounts can browse and search, but
 cannot play music through Spotifast.
 
+### Personal fork: native Spotify requests
+
+This fork replaces Spotify Web API traffic with a custom native-service client.
+Account, library, catalogue, search, playlist edits and Connect requests use the
+signed-in Spotify session. Developer Client IDs and the shared app's quota are
+not used. Existing protected playback credentials restore the session; a fresh
+sign-in uses Spotify's streaming browser approval.
+
+Spotify can still rate limit these services. The native Recent view imports the
+last track of each recently played context, rather than the Web API's last fifty
+individual plays. Local history continues to accumulate playback events. Native
+radio recommendations use the first supplied track or artist seed. Internal
+query definitions can change and require a client update. See
+[How it connects](docs/_reference/how-it-connects.md).
+
+Local playback prepares the selected song while its playlist resolves and uses
+the existing streaming buffers. The local log records playback startup timing
+without credentials. Audio quality and cache limits remain unchanged.
+When Spotify remembers a song without an active device, Play uses this computer's
+ready player. A remembered song alone does not open the device picker.
+
 ### Personal fork: offline playlists
 
 Use the circular **Download** button beside Shuffle in a playlist while local

@@ -2764,46 +2764,22 @@ mod tests {
     }
 
     #[test]
-    fn personal_app_intro_can_be_dismissed_or_open_setup_with_keyboard_focus() {
+    fn legacy_quota_dialog_explains_native_session_and_can_be_closed() {
         use egui::accesskit::{Action as AccessibleAction, Role};
-
-        for setup in [false, true] {
-            let (ctx, mut app) = accessible_app(&format!("personal-app-intro-{setup}"));
-            app.dialog = Some(Dialog::PersonalAppIntro);
-            accessible_frame(&ctx, &mut app, vec![]);
-            let tree = accessible_frame(&ctx, &mut app, vec![]);
-            let button = accessible_node(
-                &tree,
-                if setup {
-                    "Set up personal app"
-                } else {
-                    "Keep shared app"
-                },
-                Role::Button,
-            );
-            accessible_frame(
-                &ctx,
-                &mut app,
-                vec![accessible_action(button, AccessibleAction::Click, None)],
-            );
-            assert!(app.dialog.is_none());
-            assert!(app.settings.personal_app_intro_seen);
-            if setup {
-                assert_eq!(app.page(), &Page::Settings);
-                accessible_frame(&ctx, &mut app, vec![]);
-                assert!(
-                    ctx.memory(|memory| memory.has_focus(egui::Id::new("personal-web-client-id")))
-                );
-            }
-            app.backend.shutdown();
-        }
-        let (ctx, mut app) = accessible_app("personal-app-intro-escape");
+        let (ctx, mut app) = accessible_app("native-session-dialog");
         app.dialog = Some(Dialog::PersonalAppIntro);
         accessible_frame(&ctx, &mut app, vec![]);
+        let tree = accessible_frame(&ctx, &mut app, vec![]);
+        assert!(
+            tree.nodes
+                .iter()
+                .all(|(_, node)| node.label() != Some("Set up personal app"))
+        );
+        let close = accessible_node(&tree, "Close", Role::Button);
         accessible_frame(
             &ctx,
             &mut app,
-            vec![keyboard(egui::Key::Escape, egui::Modifiers::NONE)],
+            vec![accessible_action(close, AccessibleAction::Click, None)],
         );
         assert!(app.dialog.is_none());
         assert!(app.settings.personal_app_intro_seen);
@@ -3045,45 +3021,20 @@ mod tests {
     }
 
     #[test]
-    fn personal_app_setup_clears_a_saved_settings_search() {
-        use egui::accesskit::{Action as AccessibleAction, Role};
-        let (ctx, mut app) = accessible_app("settings-search-setup");
+    fn legacy_account_setup_shortcut_reveals_the_native_session_row() {
+        let (ctx, mut app) = accessible_app("native-session-shortcut");
         app.open(Page::Settings);
-        accessible_frame(&ctx, &mut app, vec![]);
-        let tree = accessible_frame(&ctx, &mut app, vec![]);
-        let field = accessible_node(&tree, "Search settings", Role::TextInput);
-        // Search for something that hides the Account section...
-        accessible_frame(
-            &ctx,
-            &mut app,
-            vec![accessible_action(field, AccessibleAction::Focus, None)],
-        );
-        accessible_frame(&ctx, &mut app, vec![egui::Event::Text("theme".into())]);
-        assert_eq!(settings_filter(&ctx), "theme");
-        // ...leave Settings...
+        ctx.data_mut(|data| {
+            data.insert_temp(egui::Id::new("settings-filter"), "theme".to_string())
+        });
         app.open(Page::Home);
+        app.actions.push(Action::OpenPersonalAppSetup);
         accessible_frame(&ctx, &mut app, vec![]);
-        // ...and enter Personal App setup, which must reveal and focus
-        // the Client ID field instead of landing on a filtered-out row.
-        app.dialog = Some(Dialog::PersonalAppIntro);
-        accessible_frame(&ctx, &mut app, vec![]);
-        let tree = accessible_frame(&ctx, &mut app, vec![]);
-        let setup = accessible_node(&tree, "Set up personal app", Role::Button);
-        accessible_frame(
-            &ctx,
-            &mut app,
-            vec![accessible_action(setup, AccessibleAction::Click, None)],
-        );
         assert_eq!(app.page(), &Page::Settings);
-        assert!(
-            settings_filter(&ctx).is_empty(),
-            "setup must drop the saved search so its row is visible"
-        );
-        accessible_frame(&ctx, &mut app, vec![]);
-        assert!(
-            ctx.memory(|memory| memory.has_focus(egui::Id::new("personal-web-client-id"))),
-            "the Client ID field takes focus once its row is visible"
-        );
+        assert!(settings_filter(&ctx).is_empty());
+        let text = settings_text(&ctx, &mut app, "Spotify session");
+        assert!(text.iter().any(|text| text == "Spotify session"));
+        assert!(!ctx.memory(|memory| memory.has_focus(egui::Id::new("personal-web-client-id"))));
         app.backend.shutdown();
     }
 
@@ -3210,31 +3161,28 @@ mod tests {
         app.settings.web_client_id = Some("test-client".into());
         app.web_app = Some("test-client".into());
         let text = settings_text(&ctx, &mut app, "Personal app ready");
-        assert!(text.iter().any(|text| text == "Personal app ready"));
+        assert!(!text.iter().any(|text| text == "Account"));
+        assert!(text.iter().any(|text| text.starts_with("No settings for")));
         app.backend.shutdown();
     }
 
     #[test]
-    fn create_an_app_row_hides_once_the_personal_app_is_ready() {
-        let (ctx, mut app) = accessible_app("settings-create-app");
-        app.settings.web_client_id = None;
-        app.web_app = None;
-        let text = settings_text(&ctx, &mut app, "Account");
-        assert!(text.iter().any(|text| text == "Create an app"));
-
-        app.settings.web_client_id = Some("test-client".into());
-        let text = settings_text(&ctx, &mut app, "Account");
-        assert!(text.iter().any(|text| text == "Create an app"));
-        assert!(
-            text.iter()
-                .any(|text| text == "Authorize your personal app")
-        );
-
-        app.web_app = Some("test-client".into());
-        let text = settings_text(&ctx, &mut app, "Account");
-        assert!(text.iter().any(|text| text == "Personal app ready"));
-        assert!(!text.iter().any(|text| text == "Create an app"));
-        assert!(!text.iter().any(|text| text == "Setup guide"));
+    fn account_settings_show_native_session_for_legacy_client_ids() {
+        let (ctx, mut app) = accessible_app("native-session-settings");
+        for configured in [false, true] {
+            app.settings.web_client_id = configured.then(|| "test-client".into());
+            app.web_app = app.settings.web_client_id.clone();
+            let text = settings_text(&ctx, &mut app, "Account");
+            assert!(text.iter().any(|text| text == "Spotify session"));
+            for obsolete in [
+                "Create an app",
+                "Authorize your personal app",
+                "Personal app ready",
+                "Setup guide",
+            ] {
+                assert!(!text.iter().any(|text| text == obsolete));
+            }
+        }
         app.backend.shutdown();
     }
 

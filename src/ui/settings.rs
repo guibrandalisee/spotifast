@@ -231,55 +231,16 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let mut any_visible = false;
     let open_folder = gettext(locale, "Open folder");
 
-    let wanted = app
-        .settings
-        .web_client_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|id| !id.is_empty())
-        .map(str::to_string);
-    let in_use = wanted
-        .as_deref()
-        .is_some_and(|wanted| app.web_app.as_deref() == Some(wanted));
     let account = gettext(locale, "Account");
     let sign_out = gettext(locale, "Sign out");
     let account_rows = [
         RowText::new(
-            gettext(locale, "Personal Spotify app"),
+            gettext(locale, "Spotify session"),
             gettext(
                 locale,
-                "Use a personal Development Mode app for a separate API quota. The shared app stays active.",
+                "Requests use Spotify native services through your signed-in account.",
             ),
         ),
-        RowText::new(
-            gettext(locale, "Create an app"),
-            gettext(
-                locale,
-                "Create one for free in Spotify's developer dashboard.",
-            ),
-        )
-        .when(!in_use),
-        RowText::new(
-            gettext(locale, "Personal app ready"),
-            gettext(
-                locale,
-                "Supported requests use your app. Other requests use the shared app.",
-            ),
-        )
-        .when(in_use),
-        RowText::new(
-            gettext(locale, "Authorize your personal app"),
-            gettext(
-                locale,
-                "Spotify opens in your browser to verify the account.",
-            ),
-        )
-        .when(!in_use && wanted.is_some()),
-        RowText::new(
-            gettext(locale, "Remove personal app"),
-            gettext(locale, "Shared access remains signed in."),
-        )
-        .when(!in_use && wanted.is_none() && app.web_app.is_some()),
         RowText::new(sign_out.clone(), account.clone()),
     ];
     if section_matches(&needle, &account, &account_rows) {
@@ -336,74 +297,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 });
                 ui.add_space(10.0);
             }
-            let mut client_id = app.settings.web_client_id.clone().unwrap_or_default();
-            filtered_row(ui, &palette, &needle, &account, &account_rows[0], |ui| {
-                let response = Frame::new()
-                    .fill(palette.surface)
-                    .corner_radius(CornerRadius::same(6))
-                    .inner_margin(Margin::symmetric(10, 6))
-                    .show(ui, |ui| {
-                        widgets::text_edit(
-                            ui,
-                            app.locale,
-                            egui::TextEdit::singleline(&mut client_id)
-                                .id(egui::Id::new("personal-web-client-id"))
-                                .hint_text(
-                                    egui::RichText::new(gettext(locale, "Client ID"))
-                                        .color(palette.dim),
-                                )
-                                .font(theme::regular(13.0))
-                                .frame(egui::Frame::NONE)
-                                .desired_width(200.0),
-                        )
-                    })
-                    .inner;
-                if ui
-                    .data_mut(|data| data.remove_temp::<bool>(egui::Id::new(PERSONAL_APP_FOCUS_ID)))
-                    .unwrap_or(false)
-                {
-                    response.scroll_to_me(Some(Align::Center));
-                    response.request_focus();
-                }
-                if response.changed() {
-                    let trimmed = client_id.trim().to_string();
-                    app.settings.web_client_id = (!trimmed.is_empty()).then_some(trimmed);
-                    changed = true;
-                }
-            });
-            filtered_row(ui, &palette, &needle, &account, &account_rows[1], |ui| {
-                if theme::pill_button(ui, &palette, &gettext(locale, "Setup guide"), false)
-                    .clicked()
-                {
-                    app.actions.push(Action::OpenUrl(
-                        "https://spotifast.rocks/make-it-even-faster/#make-a-spotify-app".into(),
-                    ));
-                }
-            });
-            if in_use {
-                filtered_row(ui, &palette, &needle, &account, &account_rows[2], |ui| {
-                    if theme::pill_button(ui, &palette, &gettext(locale, "Remove"), false).clicked()
-                    {
-                        app.settings.web_client_id = None;
-                        app.actions.push(Action::ConfigurePersonalWebApp);
-                    }
-                });
-            } else if wanted.is_some() {
-                filtered_row(ui, &palette, &needle, &account, &account_rows[3], |ui| {
-                    if theme::pill_button(ui, &palette, &gettext(locale, "Authorize"), true)
-                        .clicked()
-                    {
-                        app.actions.push(Action::ConfigurePersonalWebApp);
-                    }
-                });
-            } else if app.web_app.is_some() {
-                filtered_row(ui, &palette, &needle, &account, &account_rows[4], |ui| {
-                    if theme::pill_button(ui, &palette, &gettext(locale, "Remove"), false).clicked()
-                    {
-                        app.actions.push(Action::ConfigurePersonalWebApp);
-                    }
-                });
-            }
+            filtered_row(ui, &palette, &needle, &account, &account_rows[0], |_ui| {});
         });
     }
 

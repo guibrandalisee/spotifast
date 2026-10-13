@@ -230,6 +230,29 @@ impl ApiGateway {
         Ok(())
     }
 
+    pub fn install_native(&self, native: Arc<crate::internal::Client>, account: AccountId) {
+        self.clear_all();
+        let previous = self.shared.client();
+        let client = ApiClient::new(
+            previous.http_handle(),
+            previous.activity_handle(),
+            50,
+            50,
+            ApiSource::Shared,
+        );
+        client.set_native(Some(native));
+        *self
+            .shared
+            .client
+            .write()
+            .unwrap_or_else(|p| p.into_inner()) = Arc::new(client);
+        self.shared.set_state(SessionState::Ready { account });
+    }
+
+    pub fn native(&self) -> Option<Arc<crate::internal::Client>> {
+        self.shared.client().native()
+    }
+
     pub fn begin_verification(&self, source: ApiSource, provider: TokenProvider) {
         let session = self.session(source);
         let client = session.client().for_authorization(provider);
@@ -247,6 +270,7 @@ impl ApiGateway {
     pub fn clear(&self, source: ApiSource) {
         let session = self.session(source);
         session.client().set_token_provider(None);
+        session.client().set_native(None);
         session.state.send_modify(|current| {
             current.0 += 1;
             current.1 = SessionState::Unavailable;
@@ -299,7 +323,7 @@ impl ApiGateway {
 
     /// Whether the streaming session, when up, should answer an operation.
     pub fn session_serves(&self, operation: Operation) -> bool {
-        session_serves(operation, self.personal_ready())
+        self.native().is_none() && session_serves(operation, self.personal_ready())
     }
 
     pub fn playlist_access(&self, id: &str) -> PlaylistAccess {
@@ -340,6 +364,42 @@ impl ApiGateway {
 mod tests {
     use super::*;
     use std::future::Future;
+
+    #[tokio::test]
+    async fn native_session_routes_every_operation_without_a_personal_app() {
+        let gateway = ApiGateway::new(reqwest::Client::new(), Arc::new(NetActivity::default()));
+        let native = crate::internal::Client::new(
+            crate::http::Http::default(),
+            librespot_core::authentication::Credentials::with_access_token("test"),
+        );
+        gateway.install_native(native, AccountId::new("account"));
+        assert!(!gateway.personal_ready());
+        let expected = gateway.verification_client(ApiSource::Shared);
+        for operation in [
+            Operation::CanonicalAccount,
+            Operation::Playback,
+            Operation::UserData,
+            Operation::PlaylistLibrary,
+            Operation::PlaylistSearch,
+            Operation::CatalogSearch,
+            Operation::Catalog,
+            Operation::PlaylistCreation,
+            Operation::PlaylistMutation(PlaylistAccess::External),
+            Operation::UnsupportedDevelopmentMode,
+        ] {
+            assert!(Arc::ptr_eq(
+                &gateway.client_for(operation).await.unwrap(),
+                &expected
+            ));
+            assert!(!gateway.session_serves(operation));
+        }
+        gateway.clear_all();
+        assert!(gateway.native().is_none());
+        assert!(matches!(
+            gateway.client_for(Operation::Playback).await,
+            Err(ApiError::NotSignedIn)
+        ));
+    }
 
     #[tokio::test]
     async fn shared_requests_wait_while_a_personal_session_is_already_ready() {

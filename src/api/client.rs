@@ -1,8 +1,7 @@
-//! An authenticated, rate-limited transport for the Spotify Web API.
+//! Typed Spotify requests adapted to the native account transport.
 //!
-//! Typed calls share one `request` helper that adds the bearer token, limits
-//! concurrency, honors `Retry-After`, and formats API errors. The gateway
-//! handles capability differences before dispatch.
+//! Production has no Web API fallback. The legacy HTTP implementation remains
+//! for isolated regression tests and backwards-compatible credential schemas.
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -354,6 +353,8 @@ pub struct ApiClient {
     base_url: Option<String>,
     http: Http,
     tokens: Mutex<Option<TokenProvider>>,
+    native: Mutex<Option<Arc<crate::internal::Client>>>,
+    native_required: bool,
     limiter: Semaphore,
     queue_writes: tokio::sync::Mutex<()>,
     cooldown_until: tokio::sync::Mutex<Instant>,
@@ -378,6 +379,8 @@ impl ApiClient {
             base_url: None,
             http: http.into(),
             tokens: Mutex::new(None),
+            native: Mutex::new(None),
+            native_required: !cfg!(test),
             limiter: Semaphore::new(MAX_IN_FLIGHT),
             queue_writes: tokio::sync::Mutex::new(()),
             cooldown_until: tokio::sync::Mutex::new(Instant::now()),
@@ -388,6 +391,24 @@ impl ApiClient {
             source,
             activity,
         }
+    }
+
+    pub(crate) fn http_handle(&self) -> Http {
+        self.http.clone()
+    }
+    pub(crate) fn activity_handle(&self) -> Arc<NetActivity> {
+        self.activity.clone()
+    }
+
+    pub fn set_native(&self, native: Option<Arc<crate::internal::Client>>) {
+        *self.native.lock().unwrap_or_else(|p| p.into_inner()) = native;
+    }
+
+    pub fn native(&self) -> Option<Arc<crate::internal::Client>> {
+        self.native
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
     }
 
     pub fn set_token_provider(&self, provider: Option<TokenProvider>) {
@@ -453,6 +474,14 @@ impl ApiClient {
         jpeg: Option<&str>,
         retry_rate_limits: bool,
     ) -> Result<String> {
+        if let Some(native) = self.native() {
+            self.activity.begin();
+            let _activity = ActivityGuard(&self.activity);
+            return native.api_shape(method, path, query, body, jpeg).await;
+        }
+        if self.native_required {
+            return Err(ApiError::NotSignedIn);
+        }
         let url = if path.starts_with("http") {
             path.to_string()
         } else {
@@ -1239,6 +1268,23 @@ impl ApiClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn native_only_client_rejects_public_transport_without_a_session() {
+        let mut client = ApiClient::new(
+            reqwest::Client::new(),
+            Arc::new(NetActivity::default()),
+            20,
+            50,
+            ApiSource::Shared,
+        );
+        client.native_required = true;
+        assert!(matches!(client.me().await, Err(ApiError::NotSignedIn)));
+        assert!(matches!(
+            client.play(None, None).await,
+            Err(ApiError::NotSignedIn)
+        ));
+    }
 
     fn local_client(address: std::net::SocketAddr) -> Arc<ApiClient> {
         let http = reqwest::Client::builder().no_proxy().build().unwrap();

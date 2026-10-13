@@ -80,6 +80,7 @@ pub struct AudioControl {
     reset_output: AtomicBool,
     reset_processing: AtomicBool,
     buffer_ms: u32,
+    load_started: Mutex<Option<Instant>>,
 }
 
 #[derive(Default)]
@@ -96,7 +97,29 @@ impl AudioControl {
             reset_output: AtomicBool::new(false),
             reset_processing: AtomicBool::new(false),
             buffer_ms: buffer_ms.clamp(*BUFFER_MS_RANGE.start(), *BUFFER_MS_RANGE.end()),
+            load_started: Mutex::new(None),
         })
+    }
+
+    pub(crate) fn begin_load(&self) {
+        *self
+            .load_started
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(Instant::now());
+    }
+
+    fn first_packet_queued(&self) {
+        if let Some(started) = self
+            .load_started
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+        {
+            log::info!(
+                "playback timing: command to first queued audio = {} ms",
+                started.elapsed().as_millis()
+            );
+        }
     }
 
     /// Follows confirmed decoder transitions, including seeks requested by
@@ -150,11 +173,25 @@ impl AudioControl {
     /// Opens the write gate once librespot has left the old decoder behind.
     pub fn track_changed(&self) {
         self.waiting_for_track.store(false, Ordering::SeqCst);
+        if let Some(started) = *self
+            .load_started
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+        {
+            log::info!(
+                "playback timing: command to decoder ready = {} ms",
+                started.elapsed().as_millis()
+            );
+        }
     }
 
     /// Releases the gate if the requested replacement stopped instead.
     pub fn stopped(&self) {
         self.waiting_for_track.store(false, Ordering::SeqCst);
+        self.load_started
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
     }
 
     fn waiting_for_track(&self) -> bool {
@@ -743,6 +780,7 @@ impl Sink for RodioSink {
             Arc::clone(&output.queued),
             frames,
         ));
+        self.control.first_packet_queued();
         output.fed = true;
         output.last_write = Some(now);
         // Let rodio drain a little; without this the whole track would be
@@ -860,6 +898,20 @@ fn open_output(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn playback_timing_is_consumed_once_and_discarded_when_stopped() {
+        let audio = AudioControl::new(DEFAULT_BUFFER_MS);
+        audio.begin_load();
+        audio.track_changed();
+        assert!(audio.load_started.lock().unwrap().is_some());
+        audio.first_packet_queued();
+        assert!(audio.load_started.lock().unwrap().is_none());
+        audio.first_packet_queued();
+        audio.begin_load();
+        audio.stopped();
+        assert!(audio.load_started.lock().unwrap().is_none());
+    }
+
     use super::*;
     use std::sync::Mutex;
 

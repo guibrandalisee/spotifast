@@ -1,80 +1,73 @@
 ---
 title: How It Connects
-description: Independent Spotify grants, what is stored, and how API traffic is routed.
+description: Native Spotify requests, protected session credentials, and playback.
 nav_order: 1
 ---
 
-## Independent grants, once each
+## One native account session
 
-In this personal fork, offline playlist downloads request complete audio files
-through librespot's loader in random-access mode, instead of relying on playback
-read-ahead. Each failed song has up to five automatic retries, waiting 30, 45,
-60, 75 and 90 seconds. This budget covers metadata, audio keys and file transfer
-together. Explicit Spotify audio-key refusals follow the same cooldown schedule.
-If they persist after all five retries, they pause the download and preserve
-completed audio, because the response cannot reliably distinguish a track refusal
-from session throttling. A later explicit retry resumes from saved audio. Other song failures
-are recorded and the next song proceeds.
-Metadata alternatives and Ogg/MP3 format preferences follow librespot playback.
-Each completed track checkpoints the playlist
-manifest atomically. Partial manifests retain reusable tracks, remain playable,
-and cannot mark a playlist complete. A retry verifies ciphertext size, checksum
-and protected-key availability before reusing a completed song.
+This personal fork uses a custom Rust transport for Spotify's native services.
+Production requests cannot fall back to `api.spotify.com`, the shared developer
+app, or a personal Development Mode app. Saved developer Client IDs remain
+readable for settings compatibility, but are inactive and no longer displayed.
 
-Spotifast uses separate credentials for Web API access, a personal app, and
-local playback:
+An existing protected playback credential signs in through clienttoken and
+login5. The native profile must match the credential's account before any
+collection is loaded. Fresh browser sign-in requests streaming permission, then
+exchanges it for a reusable account credential. The account product is checked
+before the audio engine starts. Audio decoding and local Connect registration
+remain provided by librespot.
 
-On a later launch, restoring a saved Web API grant also permits read-only
-browsing of the last verified playlist library while network verification
-retries. This uses local cache files and sends no additional Spotify request.
-Normal Web API playlist loading resumes after verification.
-The restored page starts its live loading as soon as the verified connection is
-reported, without waiting for navigation or the profile event. The later profile
-event does not duplicate a playlist's in-flight song request.
-Offline rows are restored independently for the selected playlist and the
-remembered playback context. Either disk read may finish first, including while
-Spotify's sign-in verification is waiting to retry.
-The protected Web API grant remembers its verified account ID so a refreshed
-token still opens only that account's cache. Older grants gain this field on
-their next successful online verification.
+The native transport handles account details, library collections, searches,
+albums, artists, tracks, shows, episodes, playlist changes, image uploads, and
+Connect device/state/queue reads and controls. Catalogue queries use persisted
+Pathfinder operations; playlist edits use playlist/v2; Connect uses connect-state.
+Tokens and authorization responses are never logged or saved in plain files.
+Queries fail explicitly if Spotify changes an operation rather than switching
+to another application or quota.
 
-1. **The shared Web API app** keeps full catalogue and playlist coverage.
-2. **Your optional personal Web API app** handles supported playback, library,
-   catalog, catalogue search, playlist creation, and owned or collaborative
-   playlist requests without using the shared app's quota. Complete
-   playlist-library views and the playlist half of a search stay on the shared
-   app so Spotify-owned results are not filtered out. Both Web API grants must
-   verify as the same Spotify account.
-3. **Local playback** uses
-   [librespot](https://github.com/librespot-org/librespot). It needs one more
-   browser approval and keeps an independent reusable credential. Spotify Premium
-   is required. While it is signed in, its session also reads the playlists
-   the shared app would otherwise be asked for: other people's, and the
-   account's own when there is no personal app. Radio pages come only from
-   this session: the Web API has no stations. Opening one resolves the
-   station and reads its songs' details in one batched request.
+Two data differences are explicit: native Recent imports the last track in each
+recently played context, while local playback history continues to accumulate
+individual plays. Native radio recommendations use the first supplied track or
+artist seed, rather than combining Web API seeds. Native catalogue responses do
+not expose every optional Web API field, such as popularity or ISRC.
 
-Local playback authorization stays separate from both Web API grants. Its
-browser approval requests only the streaming permission and always shows the
-consent dialog. The playback session uses the account ID verified by either
-Web API grant. A verified personal app can complete sign-in while the shared
-app's verification is still waiting.
+Sign-out invalidates pending verification and in-flight account work before
+removing stored grants. Another account cannot restore an earlier account's
+playback or collection cache.
 
 Since 0.8.0, local playback retains the artist IDs
 already supplied by librespot. Artist links in the player bar work before the
-Web API's track metadata arrives, without an extra request.
+native catalogue's track metadata arrives, without an extra request.
 
 Since 0.8.0, local seeks discard audio queued from the previous
 position once librespot confirms the seek. This also applies when another
 Spotify client controls playback on this computer. Natural track transitions
 retain their queue for gapless playback. The seek still waits for librespot to
 find and fetch the requested audio, and sound already handed to the device
-cannot be recalled. Seeking adds no Web API request or full-track download.
+cannot be recalled. Seeking adds no catalogue request or full-track download.
 
 Explicit track replacements and confirmed seeks also clear the equalizer's
 filter history and the limiter's eight milliseconds of held audio. This keeps
 a fragment of the previous song out of a replacement's silent intro. Natural
 track transitions and pause/resume retain that history.
+
+An explicit local play prepares the chosen song while Connect resolves its
+playlist, without starting audio or changing the queue during preparation.
+Once the local engine is ready and idle, it also prepares the previously selected
+song in advance. Active, paused or recovering playback is not disturbed.
+Adaptive network prefetch, streaming buffers, audio quality and cache
+limits are retained. The log reports command-to-decoder and command-to-first
+queued-audio times in milliseconds; these are not acoustic latency measurements.
+Selecting a new song cancels pending reconnect recovery before that song is
+ready, so a recovery timer cannot restart the previous song during loading.
+
+Connect can retain its previous song after the active device disconnects. Native
+playback reads return no current session unless the active device is still
+registered. A song without a usable device ID cannot override the ready local
+player when choosing a target. Paused remote sessions with a device ID and
+explicit device selections keep their existing routing. Playback routing and
+device-selection failures are logged without account credentials.
 
 Since 0.8.0, requests that need a grant still being
 verified wait for it instead of showing "not signed in". Sign-out cancels
@@ -83,32 +76,8 @@ rejects a saved refresh grant, Spotifast removes that grant and asks for a new
 browser approval. Upgrading to protected storage does not itself require
 signing in again.
 
-By default, Spotifast uses the public app shared with spotify-player, ncspot,
-and Omarchy Spotify. Spotify divides its quota among all users. A personal app
-adds a separate Development Mode quota. See
-[Use a Personal Spotify App](/make-it-even-faster/).
-
-Since 0.8.0, a search runs as two requests when a
-personal app is ready: songs, artists, albums, podcasts, and episodes on the
-personal app, and playlists on the shared app. This moves catalogue search off the quota Spotify divides among every user
-of the shared app. Each half is shown the moment it
-arrives, so a shared app waiting out a rate limit no longer holds up the songs,
-and playlists appear underneath when that wait ends. A half belonging to an
-earlier search is discarded rather than shown beside a newer one. A newer or cleared search cancels the previous requests, including waits
-for shared access. If either half fails, the successful results remain usable
-with an error for the failed part. A new query starts a fresh result set; old
-songs never appear under its name. The loading indicator remains until both
-parts finish. A personal app answers
-with ten results for each type where the shared app answers with twenty, because
-Development Mode rejects the larger page. Without a personal app, one request
-still asks for all six types and nothing about a search changes.
-
-Since 0.8.0, verified Premium accounts using shared access see a
-one-time introduction to that option. Setup and dismissal are remembered in
-settings. The prompt uses the existing account profile and adds no request.
-
 Since 0.8.0, explicitly sorting a Library section loads its remaining
-pages through the existing Web API grant, one at a time, while loaded entries
+pages through the native account session, one at a time, while loaded entries
 stay visible. A failed page stops automatic loading. Spotify custom playlist
 order uses the existing account-scoped rootlist from local playback; sorting
 and dragging never write that order back to Spotify.
@@ -129,8 +98,7 @@ current-track pickup.
 
 ## What the client stores
 
-- Since 0.8.0, shared and personal Web API grants
-  and the reusable playback credential use the platform credential store:
+- The reusable account/playback credential uses the platform credential store:
   Secret Service on Linux, Keychain on macOS, and Credential Manager on
   Windows. Librespot retains its reusable credential in memory; Spotifast
   owns persistence. Flatpak can talk to `org.freedesktop.secrets` for this.
@@ -150,7 +118,7 @@ current-track pickup.
 - Liked Songs metadata, scoped to the verified account, in the cache directory.
   This behavior is available since 0.8.0.
   Cached pages less than 15 minutes old need no repeat request. Older cached
-  prefixes refresh through the existing Web API grant, one page at a time,
+  prefixes refresh through the verified native session, one page at a time,
   while the saved rows remain visible. Manual refresh starts immediately.
   Like and Unlike are kept over lagging reads until Spotify confirms them.
 - Spotifast has no telemetry, analytics, or hosted service. When the lyrics
@@ -197,7 +165,7 @@ present in Spotify metadata. Larger collection cards and page headers use the
 closest 640-pixel URL. Compact rows, page tint extraction, and softened loading
 previews use 64-pixel thumbnails. These URLs remain unchanged and follow the
 configured proxy and normal artwork cache. Choosing an artwork size and reusing
-known details add no Web API request.
+known details add no catalogue request.
 
 A ready sharp cover stays visible until its replacement is ready. A 300-pixel
 grid cover already loaded for the same item can preview a larger page cover
@@ -206,57 +174,20 @@ softened preview may appear while the larger image loads. If the completed
 response has no cover, the page shows its placeholder instead of an old image.
 
 Since 0.8.0, album and playlist scrollbars can request a distant track
-page through the existing session or Web API read path, without fetching all
+page through the native catalogue read path, without fetching all
 preceding tracks. These reads run one at a time per list and retain the existing
 rate-limit handling. Unloaded
 rows are placeholders until their page arrives; scrolling never starts playback.
 
 ## When Spotify pushes back
 
-Each Web API session has separate concurrency and rate limits. A `Retry-After`
-response pauses only that session. Sign-in verification makes one `/me` request
-per cooldown instead of repeating the HTTP request within the same wait.
-Every request respects the full `Retry-After` deadline, including requests
-already waiting for a concurrency slot. The pause starts when the response
-headers arrive. After the pause, one request checks whether Spotify is ready
-before the other waiting requests resume. A cancelled check releases its slot.
-When the header is missing or invalid, repeated rate limits use progressively
-longer waits, up to 32 seconds. The normal retry count remains bounded; queue
-appends keep their order while waiting. Playback-state reads never overlap,
-and a scheduled follow-up waits for the pending read to finish.
-Spotifast routes each request once and
-does not retry it through the other app. A playlist read the librespot session
-refuses outright, because the playlist is gone or private, is shown as such. A
-dropped connection, a read that takes longer than 30 seconds, or a page whose
-song details Spotify did not supply in full, hands the read to the Web API
-instead of caching rows without songs. A song Spotify no longer has, or
-withholds for legal reasons, is an empty row, as the Web API shows it.
-
-Spotify can also explicitly refuse the key needed to decrypt a track. When
-that happens, Spotifast stops local playback and leaves the rest of the queue
-alone instead of treating every following track as unavailable. This refusal
-comes from Spotify; trying again later may work.
-
-Before adding songs to an existing playlist, Spotifast checks the rows it
-already holds. A known duplicate produces an immediate confirmation naming the
-song. Only a playlist that has not been fully loaded needs a background scan to
-rule out duplicates. Once confirmed, the new rows appear locally at once.
-Since 0.8.0,
-a drop into an open editable playlist sends its chosen insertion position
-through the same Web API grant. Duplicate checks and confirmation retain that
-position; partial loaded pages keep the correct continuation offset. A
-successful write advances the cached playlist to Spotify's returned snapshot
-instead of downloading the playlist again. If Spotify cannot answer the scan,
-Spotifast preserves the requested edit and lets the write report its result.
-
-Since 0.8.0, manually reloading an edited playlist waits for all
-pending writes and confirmation of the returned Spotify revision before
-requesting replacement rows. Current rows, filtering, sorting, and selection
-stay visible while it loads. Automatic paging also waits for those edits.
-If metadata still reports an older revision after three immediate rechecks,
-or the request fails, the page keeps the edits and offers a retry. Refreshing
-again retries confirmation without losing the local changes. This uses the
-existing playlist requests and adds no periodic polling.
+All native operations share a six-request concurrency budget and one cooldown.
+A 429 response stops the current operation and applies Spotify's full
+`Retry-After` deadline to subsequent requests. A missing or malformed header
+uses a thirty-second pause. Mutations are not retried automatically: a network
+failure may happen after Spotify has already applied the change. Queue appends
+keep their existing serialized order. Signing out cancels waiting account work.
+There is no fallback to the shared app or a second quota.
 
 ## Podcasts on Home
 
@@ -264,7 +195,7 @@ Since 0.10.0, Home's **Your podcasts** shelf reads the first page of
 saved shows, the same request the library's Podcasts shelf makes, if it has
 not been read yet. It then asks for the five newest episodes of each of the
 eight most recently saved shows, one show at a time, through the normal
-personal/shared app routing. Spotify includes each episode's resume point in
+native session. Spotify includes each episode's resume point in
 those answers. Play uses that position so an in-progress episode continues
 rather than starting over. Shows known to be audiobooks are not asked for. These requests
 run when Home refreshes: on opening Home, at most once every ten minutes, and
@@ -276,17 +207,17 @@ remaining shows for that refresh; the shelf keeps what it showed before.
 Playlists and radios restore their own saved shuffle choice when playback starts.
 On a remote Connect device, Spotifast sets shuffle first and starts playback
 after that request succeeds, including when the saved choice is off. This uses
-the existing Web API grant and adds no polling or permission.
+the existing native session and adds no polling or permission.
 
 ## Album queueing
 
 Since 0.9.0, adding an album, single, or EP to the queue resolves
 its songs before sending playback commands. A complete album already loaded
 in the app needs no catalogue request. Otherwise, the existing album-track
-endpoint is read in pages of 50, with the normal personal/shared app routing
+endpoint is read in pages of 50, with the normal native session
 and rate limits. The album URI itself is never sent to Spotify's song queue.
 Local playback queues the resolved songs through librespot. On another device,
-Web API queue writes run one at a time in album order. A later song waits for
+Native Connect queue writes run one at a time in album order. A later song waits for
 the album's writes, and partial queue reads cannot remove the shown album
 while those writes are pending. A rate-limited queue write waits for the full
 `Retry-After` delay and retries automatically, keeping its place ahead of later
@@ -303,11 +234,11 @@ picker. Spotifast reads only the selected JPEG or PNG, preserves its aspect rati
 pixels onto white, and encodes a JPEG preview. Files must be smaller than 20 MB
 and no larger than 8192 pixels per side, within a 128 MB decoding budget.
 Encoding reduces the image to fit
-Spotify's 256 KB Base64 request limit. **Upload cover** sends that preview to
+the existing 256 KB Base64-sized cover budget. **Upload cover** sends that preview to
 Spotify; **Save** separately saves the name, description, and visibility.
 
-Uploads use the same shared or personal app routing as playlist edits. Requests
-are not retried through another app. The uploaded image stays visible while
+Uploads send JPEG bytes to Spotify's image-upload service, register the returned
+image on playlist/v2, and update the playlist picture. The uploaded image stays visible while
 Spotify propagates its artwork. A changed URL can still contain an earlier
 upload, so Spotifast checks the largest returned image through its normal
 artwork cache, off the UI thread. Only matching image bytes or decoded pixels
@@ -317,10 +248,8 @@ and a later page refresh can check again. Once confirmed, later cover changes
 from other clients can appear. The selected source file is not copied to the
 cache or settings.
 
-Image uploads require renewed Web API consent. If Spotifast asks you to sign
-in again after updating, approve the image upload permission. Reconnect your
-personal app in Settings too, if you use one. Local playback authorization is
-unchanged. Spotify can refuse changes to playlists you do not own.
+Uploads use the same verified native session as playlist edits. Spotify can
+refuse changes to playlists you do not own.
 
 On Linux the file picker uses a desktop portal, with Zenity as a fallback.
 Install your desktop's file chooser portal or Zenity if no picker opens.
@@ -328,7 +257,7 @@ Install your desktop's file chooser portal or Zenity if no picker opens.
 ## Receivers on the local network
 
 Spotify's device list only shows signed-in receivers. A new librespot or
-spotifyd receiver is therefore invisible to the Web API.
+spotifyd receiver is therefore absent from the signed-in Connect device list.
 
 Receivers announce themselves over mDNS as `_spotify-connect._tcp` and answer
 a small HTTP interface. Opening or refreshing the picker first reads
@@ -344,7 +273,7 @@ encrypted value only works for that receiver and exchange. Spotifast does not
 save another copy of the credential.
 
 The receiver then signs in and appears in Spotify's device list. Spotifast
-uses the Web API for subsequent control requests.
+uses native Connect for subsequent control requests.
 
 ## The engine
 
@@ -378,6 +307,21 @@ song changes; position reports do not copy the remaining playlist. While paused
 or stopped it waits for commands without a periodic wakeup. Commands, including
 shutdown, wake it immediately.
 
+In this personal fork, offline playlist downloads request complete audio files
+through librespot's loader in random-access mode, instead of relying on playback
+read-ahead. Each failed song has up to five automatic retries, waiting 30, 45,
+60, 75 and 90 seconds. This budget covers metadata, audio keys and file transfer
+together. Explicit Spotify audio-key refusals follow the same cooldown schedule.
+If they persist after all five retries, they pause the download and preserve
+completed audio, because the response cannot reliably distinguish a track refusal
+from session throttling. A later explicit retry resumes from saved audio. Other song failures
+are recorded and the next song proceeds.
+Metadata alternatives and Ogg/MP3 format preferences follow librespot playback.
+Each completed track checkpoints the playlist
+manifest atomically. Partial manifests retain reusable tracks, remain playable,
+and cannot mark a playlist complete. A retry verifies ciphertext size, checksum
+and protected-key availability before reusing a completed song.
+
 Downloads do not implement the official Spotify offline-license protocol or its
 renewal rules. They require the original account's retained sign-in state and an
 accessible credential store. Sign-out invalidates in-flight downloads and stops
@@ -393,7 +337,7 @@ Since 0.9.0, selecting this computer in the device picker asks
 librespot to transfer playback from the active Connect device. Spotify supplies
 the current song, position, playing or paused state, context, and queue together.
 This uses the existing playback session's Connect transfer request and needs
-no additional authorization. An old or unavailable Web API playback snapshot
+no additional authorization. An old or unavailable native playback snapshot
 does not cause the previous local song to restart or replace the remote queue.
 
 When the PulseAudio backend is selected on Linux, its PulseAudio or PipeWire
@@ -401,7 +345,7 @@ stream is named **Spotifast**, with **Spotify playback** as its description, so
 system mixers and audio processors can identify and route it. Explicit
 `PULSE_PROP_application.name` and `PULSE_PROP_stream.description` environment
 values take precedence.
-The same session checks releases that the Web API calls `single`, so confirmed
+The same session checks releases labelled `single` in catalogue metadata, so confirmed
 EPs can carry their precise label. Spotifast deduplicates these checks while
 the app session is active. If the engine reconnects, an interrupted check may
 be tried again; if metadata is unavailable, its label stays `Single`.
@@ -445,7 +389,7 @@ The mode selects the protocol. Host and port are separate fields.
 These settings apply to Spotifast's requests. The external browser used
 for Spotify approval keeps its own network and proxy settings.
 
-The Web API, artwork, lyrics, update checks and downloads, and MilkDrop preset
+Native Spotify requests, artwork, lyrics, update checks and downloads, and MilkDrop preset
 downloads follow that mode. Update downloads retain their release-host redirect
 restrictions and checksum verification. Local receivers on the LAN are never sent through a proxy.
 

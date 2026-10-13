@@ -585,6 +585,16 @@ pub enum Command {
         lease: CredentialLease,
         result: Result<crate::credentials::Loaded, crate::credentials::Error>,
     },
+    NativeVerified {
+        client: Arc<crate::internal::Client>,
+        credentials: Credentials,
+        user: Box<User>,
+        lease: CredentialLease,
+    },
+    NativeVerificationFailed {
+        lease: CredentialLease,
+        error: String,
+    },
     CredentialsRestored {
         slot: CredentialSlot,
         lease: CredentialLease,
@@ -706,6 +716,8 @@ pub enum Command {
     },
     /// Check that a reconnect's pickup really started, and try again if not.
     VerifyResume,
+    /// Prepare an idle player's previously selected song without playing it.
+    PreparePlayback(String),
     /// Add, replace, or remove the optional personal Web API application.
     ConfigurePersonalWebApp(Option<String>),
     /// Read a playlist's cached items from disk.
@@ -1790,6 +1802,11 @@ impl Worker {
                     {
                         self.api.clear(source);
                     }
+                    if !self.signed_in {
+                        self.credentials.invalidate(CredentialSlot::Playback);
+                        self.api.clear(ApiSource::Shared);
+                        self.emit(Event::Auth(AuthStatus::SignedOut));
+                    }
                     self.pending_authorization = None;
                 }
                 Command::SignOut => self.sign_out(),
@@ -1804,35 +1821,13 @@ impl Worker {
                 Command::ApplyProxy { request, config } => {
                     self.change_proxy(request, config, false)
                 }
-                Command::Player(command) => {
-                    if matches!(command, PlayerCommand::Load(_)) {
-                        // A newer play command supersedes an offline preparation still in flight.
-                        self.offline_request += 1;
-                    }
-                    if let Some(player) = &self.offline_player {
-                        if player.accepts(&command) {
-                            if let Err(error) = player.command(command) {
-                                self.emit(Event::Error(error.to_string()));
-                            }
-                            continue;
-                        }
-                        self.stop_offline();
-                        if let PlayerCommand::Load(spec) = command {
-                            self.resume = Some(PlaybackResume::Track(spec));
-                            self.resume_engine();
-                            continue;
-                        }
-                        self.resume_engine();
-                    }
-                    match &self.engine {
-                        Some(engine) => {
-                            if let Err(error) = engine.command(command) {
-                                self.emit(Event::Error(format!("Playback error: {error}")));
-                            }
-                        }
-                        None => self.emit(Event::Error(
-                            "Local playback isn't set up on this computer yet".into(),
-                        )),
+                Command::Player(command) => self.player_command(command),
+                Command::PreparePlayback(uri) => {
+                    if self.resume_verify.is_none()
+                        && self.offline_player.is_none()
+                        && let Some(engine) = &self.engine
+                    {
+                        engine.prepare_while_idle(&uri);
                     }
                 }
                 Command::Api(ApiRequest::Queue { seq }) if self.offline_player.is_some() => {
@@ -1888,6 +1883,44 @@ impl Worker {
                     self.emit(Event::Api(response));
                 }
                 Command::Accent { url } => self.accent(url),
+                Command::NativeVerified {
+                    client,
+                    credentials,
+                    user,
+                    lease,
+                } => {
+                    if lease.current() {
+                        if self
+                            .api
+                            .account()
+                            .is_some_and(|account| account.as_str() != user.id)
+                        {
+                            self.emit(Event::Error("Playback was authorized for another Spotify account. Sign out before switching accounts.".into()));
+                            continue;
+                        }
+                        self.api
+                            .install_native(client, AccountId::new(user.id.clone()));
+                        self.playback_grant = Some(credentials.clone());
+                        let notice = self.storage_notice(lease.clone());
+                        let pending = lease.save(StoredGrant::Playback(credentials));
+                        tokio::spawn(async move {
+                            if let Err(error) = pending.await {
+                                notice(error);
+                            }
+                        });
+                        self.signed_in = true;
+                        self.offline_account = Some(user.id.clone());
+                        self.emit(Event::Auth(AuthStatus::Connected {
+                            username: user.name().to_owned(),
+                        }));
+                        self.emit(Event::Api(Box::new(ApiResponse::Me(Ok(*user.clone())))));
+                        self.read_downloads(user.id.clone());
+                        self.on_account_checked(user.product.as_deref().map(|p| p == "premium"));
+                    }
+                }
+                Command::NativeVerificationFailed { lease, error } => {
+                    self.on_native_verification_failed(lease, error);
+                }
                 Command::WebSignedIn {
                     source,
                     token,
@@ -1935,7 +1968,7 @@ impl Worker {
                     attempt,
                 } => {
                     if lease.current() {
-                        self.on_playback_authorized(access_token);
+                        self.on_playback_authorized(access_token, lease);
                     } else {
                         self.finish_playback_authorization(attempt);
                     }
@@ -2255,14 +2288,11 @@ impl Worker {
         if std::mem::replace(&mut self.spotify_restore_started, true) {
             return;
         }
-        self.restore_pending = [true; 3];
+        self.restore_pending = [false, false, true];
         self.api
             .set_state(ApiSource::Shared, SessionState::Authorizing);
-        if self.web_client_id.is_some() {
-            self.api
-                .set_state(ApiSource::Personal, SessionState::Authorizing);
-        }
-        for slot in CredentialSlot::SPOTIFY {
+        {
+            let slot = CredentialSlot::Playback;
             let lease = self.credentials.lease(slot);
             let commands = self.commands.clone();
             tokio::spawn(async move {
@@ -2301,10 +2331,26 @@ impl Worker {
                 None
             }
         };
+        let native_pending = matches!(&grant, Some(StoredGrant::Playback(_)));
         match grant {
             Some(StoredGrant::Playback(grant)) => {
-                self.playback_grant = Some(grant);
-                self.resume_engine();
+                if let Some(account_id) = grant.username.clone() {
+                    self.offline_account = Some(account_id.clone());
+                    self.read_downloads(account_id.clone());
+                    let path = self.dirs.offline_library_cache_file();
+                    let events = self.events.clone();
+                    let waker = self.waker.clone();
+                    let cache_lease = lease.clone();
+                    tokio::task::spawn_blocking(move || {
+                        if let Some(cache) = crate::offline_library::read(&path, &account_id)
+                            && cache_lease.current()
+                        {
+                            let _ = events.send(Event::OfflineLibrary(cache));
+                            waker.wake();
+                        }
+                    });
+                }
+                self.verify_native(grant, lease.clone());
             }
             Some(StoredGrant::Web(token)) => {
                 let source = if slot == CredentialSlot::Shared {
@@ -2352,6 +2398,12 @@ impl Worker {
                 }
             }
             None | Some(StoredGrant::Proxy(_)) => {}
+        }
+        if native_pending {
+            return;
+        }
+        if slot == CredentialSlot::Playback {
+            self.api.clear(ApiSource::Shared);
         }
         if slot != CredentialSlot::Playback && self.web_tokens[slot.index()].is_none() {
             self.api.clear(if slot == CredentialSlot::Shared {
@@ -2555,120 +2607,17 @@ impl Worker {
     }
 
     fn sign_in(&mut self) {
-        self.sign_in_source(ApiSource::Shared);
+        self.authorize_playback();
     }
 
-    fn sign_in_source(&mut self, source: ApiSource) {
-        let http = match self.http.client() {
-            Ok(http) => http,
-            Err(error) => {
-                self.emit(Event::Error(error));
-                return;
-            }
-        };
-        if self.cancel_signin.is_some() {
-            return;
-        }
-        let grant = match source {
-            ApiSource::Shared => crate::auth::Grant::shared_web_api(),
-            ApiSource::Personal => {
-                let Some(client_id) = self.web_client_id.as_deref() else {
-                    return;
-                };
-                match crate::auth::Grant::personal_web_api(client_id) {
-                    Ok(grant) => grant,
-                    Err(error) => {
-                        self.emit(Event::Error(error.to_string()));
-                        return;
-                    }
-                }
-            }
-        };
-        self.credentials.invalidate(web_slot(source));
-        self.restore_pending[web_slot(source).index()] = false;
-        let lease = self.credentials.lease(web_slot(source));
-        self.authorization_attempt += 1;
-        let attempt = self.authorization_attempt;
-        let flow = crate::auth::begin(grant.clone());
-        let (cancel_tx, cancel_rx) = watch::channel(false);
-        self.cancel_signin = Some(cancel_tx);
-        self.authorizing_source = Some(source);
-        self.api.set_state(source, SessionState::Authorizing);
-        if source == ApiSource::Shared {
-            self.emit(Event::Auth(AuthStatus::WaitingForBrowser {
-                url: flow.url.clone(),
-            }));
-        }
-        let browser_url = flow.url.clone();
-        tokio::task::spawn_blocking(move || {
-            if let Err(error) = crate::opener::open(&browser_url) {
-                log::warn!("unable to open a browser: {error}");
-            }
-        });
-        let events = self.events.clone();
-        let waker = self.waker.clone();
-        let commands = self.commands.clone();
-        tokio::spawn(async move {
-            let result = async {
-                let code =
-                    crate::auth::wait_for_code(grant.redirect_port, &flow.state, cancel_rx).await?;
-                let response =
-                    crate::auth::exchange_code(&http, &grant, &code, &flow.verifier).await?;
-                crate::auth::StoredToken::from_response(&grant.client_id, response, None)
-            }
-            .await;
-            match result {
-                Ok(token) => {
-                    let _ = commands.send(Command::WebSignedIn {
-                        source,
-                        token: Box::new(token),
-                        lease: lease.clone(),
-                        attempt,
-                    });
-                }
-                Err(error) => {
-                    if lease.current() && source == ApiSource::Shared {
-                        let _ = events.send(Event::Auth(AuthStatus::SignedOut));
-                    }
-                    let message = error.to_string();
-                    if lease.current() && !message.contains("cancelled") {
-                        let _ = events.send(Event::Error(format!("Sign-in failed: {message}")));
-                    }
-                    waker.wake();
-                    let _ = commands.send(Command::SignInEnded { source, attempt });
-                }
-            }
-        });
+    fn sign_in_source(&mut self, _source: ApiSource) {
+        self.authorize_playback();
     }
 
     fn configure_personal_web_app(&mut self, client_id: Option<String>) {
-        let authorization_in_flight = if let Some(cancel) = self.cancel_signin.as_ref() {
-            let _ = cancel.send(true);
-            self.credentials.invalidate(
-                self.authorizing_source
-                    .map_or(CredentialSlot::Playback, web_slot),
-            );
-            true
-        } else {
-            false
-        };
-        if let Err(error) = self.credentials.revoke(CredentialSlot::Personal) {
-            self.emit(Event::Error(error.to_string()));
-        }
-        self.delete_stored_grant(CredentialSlot::Personal);
-        self.web_tokens[CredentialSlot::Personal.index()] = None;
+        // Retain old settings for file compatibility; native traffic has no app split.
         self.web_client_id = client_id;
-        self.api.clear(ApiSource::Personal);
         self.emit(Event::WebApp { client_id: None });
-        if self.web_client_id.is_some() {
-            if authorization_in_flight {
-                self.pending_authorization = Some(ApiSource::Personal);
-            } else {
-                self.sign_in_source(ApiSource::Personal);
-            }
-        } else {
-            self.pending_authorization = None;
-        }
     }
 
     fn delete_stored_grant(&self, slot: CredentialSlot) {
@@ -2724,15 +2673,70 @@ impl Worker {
 
     // ---- local playback engine -------------------------------------------
 
-    fn on_playback_authorized(&mut self, access_token: String) {
-        let Some(credentials) = playback_credentials(self.api.account(), access_token) else {
+    fn on_playback_authorized(&mut self, access_token: String, lease: CredentialLease) {
+        if !lease.current() {
             self.engine_busy = false;
             self.emit(Event::Playback(LocalPlayback::Failed(
-                "Finish signing in to Spotify before enabling playback.".into(),
+                "Spotify sign-in was cancelled.".into(),
             )));
             return;
-        };
-        self.connect_engine(credentials);
+        }
+        self.cancel_signin = None;
+        self.verify_native(Credentials::with_access_token(access_token), lease);
+    }
+
+    fn verify_native(&mut self, credentials: Credentials, lease: CredentialLease) {
+        if !self.signed_in {
+            self.api
+                .set_state(ApiSource::Shared, SessionState::Authorizing);
+            self.emit(Event::Auth(AuthStatus::Connecting));
+        }
+        let http = self.http.clone();
+        let proxy = self.engine_config.proxy.librespot_url();
+        let commands = self.commands.clone();
+        tokio::spawn(async move {
+            let result = async {
+                let credentials = if credentials.username.is_none() {
+                    let session = librespot_core::Session::new(librespot_core::config::SessionConfig { proxy, ..Default::default() }, None);
+                    let connection = tokio::time::timeout(Duration::from_secs(30), session.connect(credentials, false)).await;
+                    let connected = matches!(connection, Ok(Ok(())));
+                    if !connected { session.shutdown(); return Err(ApiError::NotSignedIn); }
+                    let credentials = Credentials { username: Some(session.username()), auth_data: session.auth_data(), auth_type: librespot_protocol::authentication::AuthenticationType::AUTHENTICATION_STORED_SPOTIFY_CREDENTIALS };
+                    session.shutdown();
+                    credentials
+                } else { credentials };
+                let client = crate::internal::Client::new(http, credentials.clone());
+                let bytes = client.api_shape(reqwest::Method::GET, "/me", &[], None, None).await?;
+                let user: User = serde_json::from_str(&bytes).map_err(|_| ApiError::Decode("Native account profile".into()))?;
+                if user.id.is_empty() || credentials.username.as_deref() != Some(user.id.as_str()) { return Err(ApiError::NotSignedIn); }
+                Ok((client, credentials, user))
+            }.await;
+            let command = match result {
+                Ok((client, credentials, user)) => Command::NativeVerified {
+                    client,
+                    credentials,
+                    user: Box::new(user),
+                    lease,
+                },
+                Err(error) => Command::NativeVerificationFailed {
+                    lease,
+                    error: error.to_string(),
+                },
+            };
+            let _ = commands.send(command);
+        });
+    }
+
+    fn on_native_verification_failed(&mut self, lease: CredentialLease, error: String) {
+        if !lease.current() {
+            return;
+        }
+        if self.signed_in {
+            self.emit(Event::Error(error));
+        } else {
+            self.api.clear(ApiSource::Shared);
+            self.emit(Event::Auth(AuthStatus::Failed(error)));
+        }
     }
 
     fn download_account(&self) -> Option<String> {
@@ -3098,6 +3102,11 @@ impl Worker {
         let (cancel_tx, cancel_rx) = watch::channel(false);
         self.cancel_signin = Some(cancel_tx);
         self.emit(Event::Playback(LocalPlayback::Authorizing));
+        if !self.signed_in {
+            self.emit(Event::Auth(AuthStatus::WaitingForBrowser {
+                url: flow.url.clone(),
+            }));
+        }
         let browser_url = flow.url.clone();
         tokio::task::spawn_blocking(move || {
             if let Err(error) = crate::opener::open(&browser_url) {
@@ -3269,6 +3278,9 @@ impl Worker {
                     });
                 }
                 let device_id = engine.device_id().to_string();
+                if let Some(native) = self.api.native() {
+                    native.set_device_id(&device_id);
+                }
                 let engine = Arc::new(engine);
                 self.heard = Some(engine.heard());
                 if let Some(spec) = self.resume.take() {
@@ -3394,6 +3406,42 @@ impl Worker {
             let _ = events.send(Event::UpdateChecked { manual, result });
             waker.wake();
         });
+    }
+
+    fn player_command(&mut self, command: PlayerCommand) {
+        if matches!(command, PlayerCommand::Load(_)) {
+            // A user's newer load takes precedence even while it is still
+            // preparing audio. A recovery timer must not load the old song
+            // again merely because the replacement is not playing yet.
+            self.offline_request += 1;
+            self.resume = None;
+            self.resume_verify = None;
+        }
+        if let Some(player) = &self.offline_player {
+            if player.accepts(&command) {
+                if let Err(error) = player.command(command) {
+                    self.emit(Event::Error(error.to_string()));
+                }
+                return;
+            }
+            self.stop_offline();
+            if let PlayerCommand::Load(spec) = command {
+                self.resume = Some(PlaybackResume::Track(spec));
+                self.resume_engine();
+                return;
+            }
+            self.resume_engine();
+        }
+        match &self.engine {
+            Some(engine) => {
+                if let Err(error) = engine.command(command) {
+                    self.emit(Event::Error(format!("Playback error: {error}")));
+                }
+            }
+            None => self.emit(Event::Error(
+                "Local playback isn't set up on this computer yet".into(),
+            )),
+        }
     }
 
     /// Verifies playback after reconnect and retries loads rejected while
@@ -5462,6 +5510,7 @@ mod playlist_cache_tests {
 
 /// Bind a streaming token to an account verified by either Web API grant.
 /// A late browser result after sign-out must not start an anonymous session.
+#[cfg(test)]
 fn playback_credentials(account: Option<AccountId>, access_token: String) -> Option<Credentials> {
     let account = account.filter(|account| !account.as_str().is_empty())?;
     Some(Credentials {
@@ -5475,6 +5524,36 @@ fn playback_credentials(account: Option<AccountId>, access_token: String) -> Opt
 #[cfg(test)]
 mod authorization_tests {
     use super::*;
+
+    #[test]
+    fn native_reauthorization_failure_preserves_the_existing_account() {
+        let (_runtime, mut worker, events) = worker("native-reauthorization-failure");
+        let client = crate::internal::Client::new(
+            worker.http.clone(),
+            Credentials::with_access_token("test"),
+        );
+        worker.api.install_native(client, AccountId::new("alice"));
+        worker.signed_in = true;
+        let lease = worker.credentials.lease(CredentialSlot::Playback);
+        worker.on_native_verification_failed(lease, "Verification failed".into());
+        assert_eq!(worker.api.account().unwrap().as_str(), "alice");
+        assert!(matches!(
+            worker.api.state(ApiSource::Shared),
+            SessionState::Ready { .. }
+        ));
+        assert!(matches!(events.try_recv(), Ok(Event::Error(_))));
+        assert!(events.try_recv().is_err());
+    }
+
+    #[test]
+    fn cancelled_native_verification_cannot_change_authentication_state() {
+        let (_runtime, mut worker, events) = worker("native-verification-cancelled");
+        let lease = worker.credentials.lease(CredentialSlot::Playback);
+        worker.credentials.invalidate(CredentialSlot::Playback);
+        worker.on_native_verification_failed(lease, "Verification failed".into());
+        assert!(events.try_recv().is_err());
+        assert!(worker.api.account().is_none());
+    }
 
     #[test]
     fn leaving_offline_mode_releases_the_retained_download_session() {
@@ -5977,6 +6056,36 @@ mod authorization_tests {
             Waker::default(),
         );
         (runtime, worker, events)
+    }
+
+    #[test]
+    fn a_new_play_cancels_recovery_even_before_the_new_audio_is_ready() {
+        use crate::player::LoadSpec;
+        let (_runtime, mut worker, _events) = worker("new-play-cancels-recovery");
+        let old = PlaybackResume::Track(LoadSpec {
+            uris: vec!["spotify:track:old".into()],
+            play: true,
+            ..Default::default()
+        });
+        worker.resume = Some(old.clone());
+        worker.resume_verify = Some((old, 1));
+        worker.player_command(PlayerCommand::VolumePreview(100));
+        assert!(
+            worker.resume_verify.is_some(),
+            "a volume change does not cancel recovery"
+        );
+        worker.player_command(PlayerCommand::Load(LoadSpec {
+            uris: vec!["spotify:track:selected".into()],
+            play: true,
+            ..Default::default()
+        }));
+        assert!(worker.resume.is_none());
+        assert!(worker.resume_verify.is_none());
+        worker.verify_resume();
+        assert!(
+            worker.resume_verify.is_none(),
+            "an already queued timer cannot revive the old load"
+        );
     }
 
     #[test]
@@ -6502,7 +6611,9 @@ mod authorization_tests {
     fn a_playback_browser_result_after_sign_out_cannot_start_an_engine() {
         let (_runtime, mut worker, events) = worker("signed-out");
         worker.engine_busy = true;
-        worker.on_playback_authorized("dummy-streaming-token".into());
+        let lease = worker.credentials.lease(CredentialSlot::Playback);
+        worker.credentials.invalidate(CredentialSlot::Playback);
+        worker.on_playback_authorized("dummy-streaming-token".into(), lease);
         assert!(!worker.engine_busy);
         assert!(worker.engine.is_none());
         assert!(
