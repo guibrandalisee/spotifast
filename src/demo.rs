@@ -266,6 +266,7 @@ fn page<T>(items: Vec<T>) -> ApiPage<T> {
 }
 
 pub fn populate(app: &mut App) {
+    app.invalidate_sidebar();
     app.backend.set_offline(true);
     app.offline = true;
     app.auth = AuthStatus::Connected {
@@ -2294,7 +2295,8 @@ mod tests {
         let painted = view_frame(&ctx, &mut app, vec![], view);
         assert!(painted.iter().any(|(text, _)| *text == shows[0].1));
 
-        app.audiobook_shows.insert(shows[0].0.clone());
+        // Use the same metadata update boundary as the backend notification.
+        app.note_audiobook_shows([shows[0].0.clone()]);
         let painted = view_frame(&ctx, &mut app, vec![], view);
         assert!(!painted.iter().any(|(text, _)| *text == shows[0].1));
         assert!(painted.iter().any(|(text, _)| *text == shows[1].1));

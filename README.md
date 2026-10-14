@@ -50,6 +50,9 @@ ready player. A remembered song alone does not open the device picker.
 
 Library sidebar rows are reused between repaints. Renames, permissions, folders,
 pins, search, ordering and language changes rebuild the prepared rows immediately.
+Unchanged repaints validate only a generation and small view inputs, without
+walking the library. Metadata changes still receive the full dependency check;
+playback progress alone does not invalidate the prepared sidebar.
 Episode and Recent views prepare only visible rows, avoiding full-list snapshots
 on each repaint.
 Metadata caches also use estimated byte budgets: inactive paging windows keep

@@ -39,8 +39,70 @@ struct Entry {
 }
 
 pub(crate) struct EntriesCache {
+    validation: u64,
     fingerprint: u64,
     prepared: Arc<PreparedEntries>,
+}
+
+// Only scalar state and the small view inputs are inspected on a cache hit.
+// App advances the generation at mutation boundaries, never for a progress tick.
+fn entries_validation(app: &App, shelf: Filter, sort: LibrarySort, needle: &str) -> u64 {
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    (
+        app.sidebar_generation,
+        std::mem::discriminant(&shelf),
+        std::mem::discriminant(&sort),
+        std::mem::discriminant(&app.locale),
+        app.user_id(),
+        app.browsing_saved_library(),
+        needle,
+    )
+        .hash(&mut hash);
+    // Loading can start outside an action when opening the first window.
+    // Include it without walking any metadata or ordered collections.
+    match shelf {
+        Filter::Playlists => {
+            (
+                std::mem::discriminant(&app.library.playlists),
+                app.library.playlists.get().map(Vec::len),
+                app.library.liked.total,
+            )
+                .hash(&mut hash);
+        }
+        Filter::Albums => {
+            let list = &app.library.albums;
+            (
+                list.revision,
+                list.loading,
+                &list.error,
+                list.can_load_more(),
+                list.items.len(),
+            )
+                .hash(&mut hash);
+        }
+        Filter::Artists => {
+            let list = &app.library.artists;
+            (
+                list.loading,
+                &list.error,
+                list.can_load_more(),
+                list.items.len(),
+            )
+                .hash(&mut hash);
+        }
+        Filter::Podcasts => {
+            let list = &app.library.shows;
+            (
+                list.revision,
+                list.loading,
+                &list.error,
+                list.can_load_more(),
+                list.items.len(),
+            )
+                .hash(&mut hash);
+        }
+    }
+    hash.finish()
 }
 
 struct PreparedEntries {
@@ -182,14 +244,26 @@ fn prepared_entries(
     sort: LibrarySort,
     needle: &str,
 ) -> Arc<PreparedEntries> {
-    let fingerprint = entries_fingerprint(app, shelf, sort, needle);
+    let validation = entries_validation(app, shelf, sort, needle);
     if let Some(cache) = &app.sidebar_entries
+        && cache.validation == validation
+    {
+        return Arc::clone(&cache.prepared);
+    }
+    #[cfg(test)]
+    {
+        app.sidebar_metadata_checks += 1;
+    }
+    let fingerprint = entries_fingerprint(app, shelf, sort, needle);
+    if let Some(cache) = &mut app.sidebar_entries
         && cache.fingerprint == fingerprint
     {
+        cache.validation = validation;
         return Arc::clone(&cache.prepared);
     }
     let prepared = Arc::new(build_entries(app, shelf, sort, needle));
     app.sidebar_entries = Some(EntriesCache {
+        validation,
         fingerprint,
         prepared: Arc::clone(&prepared),
     });
@@ -2313,6 +2387,7 @@ mod cache_tests {
         };
         let uri = playlists[0].uri.clone();
         playlists[0].name = "Renamed immediately".into();
+        app.invalidate_sidebar();
         let renamed = prepared_entries(&mut app, Filter::Playlists, LibrarySort::Name, "");
         assert!(!Arc::ptr_eq(&first, &renamed));
         assert!(
@@ -2321,6 +2396,43 @@ mod cache_tests {
                 .iter()
                 .any(|entry| entry.uri == uri && entry.name == "Renamed immediately")
         );
+    }
+
+    #[test]
+    fn progress_repaints_do_not_scan_metadata_and_actions_invalidate_rows() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        let first = prepared_entries(&mut app, Filter::Playlists, LibrarySort::Name, "");
+        let checks = app.sidebar_metadata_checks;
+        for _ in 0..100 {
+            app.local.position_ms += 250;
+            let same = prepared_entries(&mut app, Filter::Playlists, LibrarySort::Name, "");
+            assert!(Arc::ptr_eq(&first, &same));
+        }
+        assert_eq!(app.sidebar_metadata_checks, checks);
+        app.apply(
+            Action::ArrangeLibrary {
+                pinned: vec![],
+                playlist_order: None,
+            },
+            &ctx,
+        );
+        let unpinned = prepared_entries(&mut app, Filter::Playlists, LibrarySort::Name, "");
+        assert!(!Arc::ptr_eq(&first, &unpinned));
+        assert_eq!(app.sidebar_metadata_checks, checks + 1);
+        app.apply(Action::ToggleLibraryFolder("folder".into()), &ctx);
+        prepared_entries(&mut app, Filter::Playlists, LibrarySort::Spotify, "");
+        assert_eq!(app.sidebar_metadata_checks, checks + 2);
+        let locale_rows = prepared_entries(&mut app, Filter::Albums, LibrarySort::Name, "");
+        app.apply(
+            Action::SetLanguage(crate::settings::LanguageChoice::Locale(Locale::German)),
+            &ctx,
+        );
+        let changed = prepared_entries(&mut app, Filter::Albums, LibrarySort::Name, "");
+        assert!(!Arc::ptr_eq(&locale_rows, &changed));
+        let checks = app.sidebar_metadata_checks;
+        prepared_entries(&mut app, Filter::Albums, LibrarySort::Name, "search");
+        assert_eq!(app.sidebar_metadata_checks, checks + 1);
     }
 
     #[test]

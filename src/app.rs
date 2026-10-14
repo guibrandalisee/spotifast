@@ -404,6 +404,9 @@ pub struct App {
     /// Built table rows, keyed by page. Capped; dropped on reset and eviction.
     pub table_rows: HashMap<Page, TableRowsCache>,
     pub(crate) sidebar_entries: Option<crate::ui::sidebar::EntriesCache>,
+    pub(crate) sidebar_generation: u64,
+    #[cfg(test)]
+    pub(crate) sidebar_metadata_checks: usize,
     page_used: HashMap<Page, Instant>,
     track_used: HashMap<String, Instant>,
 
@@ -898,6 +901,9 @@ impl App {
             confirmed_ep_albums: HashSet::new(),
             table_rows: HashMap::new(),
             sidebar_entries: None,
+            sidebar_generation: 0,
+            #[cfg(test)]
+            sidebar_metadata_checks: 0,
             page_used: HashMap::new(),
             track_used: HashMap::new(),
             history,
@@ -2018,6 +2024,15 @@ impl App {
 
     // ---- frame ---------------------------------------------------------------
 
+    pub(crate) fn invalidate_sidebar(&mut self) {
+        self.sidebar_generation = self.sidebar_generation.wrapping_add(1);
+    }
+
+    pub(crate) fn note_audiobook_shows(&mut self, uris: impl IntoIterator<Item = String>) {
+        self.audiobook_shows.extend(uris);
+        self.invalidate_sidebar();
+    }
+
     fn handle_events(&mut self) {
         let events = self.backend.poll();
         self.handle_backend_events(events);
@@ -2025,6 +2040,15 @@ impl App {
 
     fn handle_backend_events(&mut self, events: Vec<Event>) {
         for event in events {
+            // Catalogue/account/settings events can change prepared rows.
+            // Progress-only local events and API polling use their own paths.
+            let changes_sidebar = !matches!(
+                &event,
+                Event::Api(_) | Event::Local(_) | Event::AudiobookShows(_)
+            );
+            if changes_sidebar {
+                self.invalidate_sidebar();
+            }
             if self.offline
                 && (self.update_source.is_github()
                     || !matches!(
@@ -2271,7 +2295,7 @@ impl App {
                     self.set_user_name(id, name);
                 }
                 Event::AudiobookShows(uris) => {
-                    self.audiobook_shows.extend(uris);
+                    self.note_audiobook_shows(uris);
                 }
                 Event::Radio {
                     seed,
@@ -2563,6 +2587,9 @@ impl App {
     }
 
     fn handle_local(&mut self, state: LocalState) {
+        if state.track != self.local.track {
+            self.invalidate_sidebar();
+        }
         if self
             .local_transfer_sequence
             .is_some_and(|sequence| sequence != state.track_sequence)
@@ -5218,6 +5245,12 @@ impl App {
     }
 
     fn handle_api(&mut self, mut response: ApiResponse) {
+        if !matches!(
+            &response,
+            ApiResponse::PlaybackState { .. } | ApiResponse::Queue { .. } | ApiResponse::Devices(_)
+        ) {
+            self.invalidate_sidebar();
+        }
         match &mut response {
             ApiResponse::Playlist {
                 id,
@@ -7047,6 +7080,16 @@ impl App {
         if !Self::is_sidebar_context(uri) {
             return;
         }
+        if self
+            .recent_contexts
+            .first()
+            .is_some_and(|first| first == uri)
+            && self.recent_contexts.len() <= RECENT_CONTEXTS_KEPT
+            && !self.recent_contexts.iter().skip(1).any(|held| held == uri)
+        {
+            return;
+        }
+        self.invalidate_sidebar();
         self.recent_contexts.retain(|held| held != uri);
         self.recent_contexts.insert(0, uri.to_string());
         self.recent_contexts.truncate(RECENT_CONTEXTS_KEPT);
@@ -7071,6 +7114,7 @@ impl App {
             if Self::is_sidebar_context(uri) && !self.recent_contexts.iter().any(|held| held == uri)
             {
                 self.recent_contexts.push(uri.to_string());
+                self.invalidate_sidebar();
                 self.session_dirty = true;
             }
         }
@@ -8924,6 +8968,9 @@ impl App {
     }
 
     pub(crate) fn apply(&mut self, action: Action, ctx: &egui::Context) {
+        // All user edits go through actions after drawing. The detailed
+        // fingerprint still avoids rebuilding rows for unrelated actions.
+        self.invalidate_sidebar();
         if self.browsing_saved_library() {
             let allowed = match &action {
                 Action::Open(Page::Playlist(id)) => {
@@ -11379,6 +11426,34 @@ mod radio;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn sidebar_generation_tracks_metadata_events_but_not_progress_polling() {
+        let mut app = headless_app();
+        let generation = app.sidebar_generation;
+        let mut local = app.local.clone();
+        local.position_ms += 250;
+        app.handle_backend_events(vec![Event::Local(Box::new(local))]);
+        assert_eq!(app.sidebar_generation, generation);
+        app.handle_api(ApiResponse::Devices(Ok(vec![])));
+        assert_eq!(app.sidebar_generation, generation);
+        app.handle_backend_events(vec![Event::AudiobookShows(vec![
+            "spotify:show:test".into(),
+        ])]);
+        assert_ne!(app.sidebar_generation, generation);
+        let generation = app.sidebar_generation;
+        app.handle_backend_events(vec![Event::AlbumType {
+            uri: "spotify:album:test".into(),
+            result: Ok(true),
+        }]);
+        assert_ne!(app.sidebar_generation, generation);
+        let generation = app.sidebar_generation;
+        app.note_recent_context("spotify:playlist:test");
+        assert_ne!(app.sidebar_generation, generation);
+        let generation = app.sidebar_generation;
+        app.note_recent_context("spotify:playlist:test");
+        assert_eq!(app.sidebar_generation, generation);
+    }
+
     use std::sync::Arc;
 
     use super::*;
