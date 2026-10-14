@@ -31,6 +31,13 @@ existing global limit. Repeated songs share one metadata read per snapshot,
 while their repeated positions remain in the shown queue. An error stops
 later batches. Queue writes retain their serial ordering.
 
+The native metadata cache discards expired entries, then the least recently used
+entries, up to 500 entries and an estimated 32 MiB. Capacity eviction keeps the
+remaining fresh data. Catalogue metadata still expires after five minutes;
+collection and rootlist data still expire after thirty seconds. Playlist and
+library writes invalidate cached data as before. An oversized value is returned
+to its caller without being retained in the cache.
+
 Two data differences are explicit: native Recent imports the last track in each
 recently played context, while local playback history continues to accumulate
 individual plays. Native radio recommendations use the first supplied track or

@@ -59,6 +59,8 @@ playlist edits stay protected. Returning to discarded data can require a new rea
 these budgets do not cap the whole app's RAM.
 Cold queue metadata is read in batches of at most three under the global request
 limit. Duplicate songs share a read without changing their queue positions.
+The native metadata cache removes expired or least recently used entries instead
+of flushing at capacity, with limits of 500 entries and an estimated 32 MiB.
 
 ### Personal fork: offline playlists
 

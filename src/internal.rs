@@ -4,6 +4,7 @@
 //! Web Player bundles on 2026-10-12. Only identifiers are retained, not its code.
 
 mod adapter;
+mod cache;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -42,7 +43,7 @@ pub struct Client {
     cooldown: Mutex<Instant>,
     requests: Semaphore,
     origin: std::sync::RwLock<String>,
-    cache: Mutex<std::collections::HashMap<String, (Instant, serde_json::Value)>>,
+    cache: Mutex<cache::MetadataCache>,
 }
 
 fn protocol_error() -> ApiError {
@@ -77,7 +78,7 @@ impl Client {
             cooldown: Mutex::new(Instant::now()),
             requests: Semaphore::new(6),
             origin: std::sync::RwLock::new(String::new()),
-            cache: Mutex::new(std::collections::HashMap::new()),
+            cache: Mutex::new(cache::MetadataCache::default()),
         })
     }
 
@@ -469,9 +470,6 @@ impl Client {
         let value = self.graphql(name, hash, variables).await?;
         if cached {
             let mut cache = self.cache.lock().await;
-            if cache.len() >= 500 {
-                cache.clear();
-            }
             cache.insert(key, (Instant::now(), value.clone()));
         }
         Ok(value)
