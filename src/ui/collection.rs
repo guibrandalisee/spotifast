@@ -955,6 +955,7 @@ pub fn table(app: &mut App, ui: &mut egui::Ui, table: Table<'_>) {
                 context: &context,
                 show_cover,
                 show_album: table.show_album,
+                show_play_count: false,
                 // Rows reserve the column only where the header does.
                 added_at: added_at.as_deref().filter(|_| table.show_added),
                 added_by: added_by.as_deref(),
@@ -2624,6 +2625,7 @@ mod tests {
                         external_urls: Default::default(),
                     }),
                     popularity: None,
+                    play_count: None,
                     external_ids: Default::default(),
                     linked_from: None,
                     external_urls: Default::default(),

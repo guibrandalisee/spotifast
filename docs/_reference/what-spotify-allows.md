@@ -17,7 +17,7 @@ application's quota. Native services can still return rate limits.
 - **Playlists:** metadata, contents, creation, name, description, visibility,
   adding/removing/reordering tracks, following and unfollowing, and cover uploads.
 - **Catalogue:** search, albums, artists, tracks, shows, episodes, artist top
-  tracks, discography and related artists.
+  tracks (including total stream counts), discography and related artists.
 - **Connect:** devices, transfer, play/pause, skips, seek, shuffle, repeat,
   volume, queue reads and queue appends.
 
@@ -106,6 +106,3 @@ The Web API and librespot do not provide these features:
 - **Friend activity, private-session status, and similar social features.**
   Spotify has no public API for them.
 - **Canvas videos and video podcasts.** librespot does not provide them.
-- **Play counts.** Spotify shows them only through a private endpoint its own
-  apps use. The Web API has no play counts, and librespot does not provide
-  them. See [issue #543](https://github.com/crmne/spotifast/issues/543).

@@ -1113,6 +1113,8 @@ pub struct TrackRow<'a> {
     pub context: &'a RowContext,
     pub show_cover: bool,
     pub show_album: bool,
+    /// Artist Popular rows reserve a column for total streams.
+    pub show_play_count: bool,
     pub added_at: Option<&'a str>,
     /// Who put the song here, on playlists made together.
     pub added_by: Option<&'a str>,
@@ -1171,6 +1173,7 @@ struct Columns {
     number: f32,
     cover: f32,
     album: f32,
+    play_count: f32,
     added_by: f32,
     added: f32,
     heart: f32,
@@ -1191,6 +1194,11 @@ fn columns(width: f32, row: &TrackRow<'_>) -> Columns {
         },
         album: if row.show_album && medium {
             (width * 0.28).clamp(140.0, 360.0)
+        } else {
+            0.0
+        },
+        play_count: if row.show_play_count && medium && !row.compact {
+            (width * 0.22).clamp(160.0, 260.0)
         } else {
             0.0
         },
@@ -1443,7 +1451,8 @@ fn track_row_contents(
         x += cols.cover;
     }
     let right_fixed = cols.heart + cols.duration + cols.more + 8.0;
-    let text_right = rect.right() - right_fixed - cols.added - cols.added_by - cols.album;
+    let text_right =
+        rect.right() - right_fixed - cols.added - cols.added_by - cols.album - cols.play_count;
     let title_rect = Rect::from_min_max(
         pos2(x, rect.top()),
         pos2((text_right - 12.0).max(x), rect.bottom()),
@@ -1642,6 +1651,32 @@ fn track_row_contents(
         });
     }
     x = text_right;
+
+    // Total streams, supplied with the artist's top tracks. Unknown is blank,
+    // never a fabricated zero or a popularity score.
+    if cols.play_count > 0.0 {
+        if let PlayableItem::Track(track) = row.item
+            && let Some(count) = track.play_count
+        {
+            let count_rect = Rect::from_min_size(
+                pos2(x, rect.top()),
+                vec2(cols.play_count - 12.0, row_height),
+            );
+            let mut child = ui.new_child(
+                UiBuilder::new()
+                    .max_rect(count_rect)
+                    .layout(Layout::left_to_right(Align::Center)),
+            );
+            child.set_clip_rect(count_rect.intersect(ui.clip_rect()));
+            theme::text(
+                &mut child,
+                util::format_count(count),
+                theme::regular(13.0),
+                palette.secondary,
+            );
+        }
+        x += cols.play_count;
+    }
 
     // Album.
     if cols.album > 0.0 {
@@ -3786,6 +3821,7 @@ mod tests {
                                     context: &context,
                                     show_cover: false,
                                     show_album: false,
+                                    show_play_count: false,
                                     added_at: None,
                                     added_by: None,
                                     show_added_by: false,

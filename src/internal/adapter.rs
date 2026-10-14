@@ -145,6 +145,11 @@ fn track_shape(value: &Value) -> Value {
     result["artists"] = json!(artists(value));
     result["track_number"] = value["trackNumber"].clone();
     result["disc_number"] = value["discNumber"].clone();
+    result["play_count"] = json!(value["playcount"].as_u64().or_else(|| {
+        value["playcount"]
+            .as_str()
+            .and_then(|count| count.parse::<u64>().ok())
+    }));
     result["is_playable"] = at(value, "/playability/playable").clone();
     if value["albumOfTrack"].is_object() {
         result["album"] = album_shape(&value["albumOfTrack"]);
@@ -1138,6 +1143,35 @@ mod tests {
             serde_json::from_value(track_shape(&Value::Null)).unwrap();
         assert_eq!(track.is_playable, Some(false));
         assert!(track.uri.is_empty());
+    }
+    #[test]
+    fn artist_top_tracks_preserve_exact_stream_counts() {
+        for (native, expected) in [
+            (json!("12345678901"), Some(12_345_678_901)),
+            (json!(7654321), Some(7_654_321)),
+            (json!("0"), Some(0)),
+            (json!(u64::MAX.to_string()), Some(u64::MAX)),
+            (Value::Null, None),
+            (json!(""), None),
+            (json!("unknown"), None),
+            (json!("-1"), None),
+            (json!(1.5), None),
+        ] {
+            let track: crate::api::models::Track = serde_json::from_value(convert(
+                &json!({"uid":"row", "track":{"uri":"spotify:track:one", "name":"Song", "playcount":native}}),
+                "track",
+            )).unwrap();
+            assert_eq!(track.play_count, expected);
+        }
+        let old: crate::api::models::Track =
+            serde_json::from_value(json!({"name":"Old cached song", "popularity":99})).unwrap();
+        assert_eq!(old.play_count, None);
+        assert!(
+            serde_json::to_value(old)
+                .unwrap()
+                .get("play_count")
+                .is_none()
+        );
     }
     #[test]
     fn pagination_keeps_native_offsets_and_totals() {

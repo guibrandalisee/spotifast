@@ -366,7 +366,18 @@ pub fn populate(app: &mut App) {
     // Artist page.
     let mut artist_page = ArtistPage {
         artist: Loadable::Loaded(artist(0)),
-        top_tracks: Loadable::Loaded(tracks.iter().take(10).cloned().collect()),
+        top_tracks: Loadable::Loaded(
+            tracks
+                .iter()
+                .take(10)
+                .cloned()
+                .enumerate()
+                .map(|(index, mut track)| {
+                    track.play_count = Some(1_234_567_890 - index as u64 * 98_765_432);
+                    track
+                })
+                .collect(),
+        ),
         related: Loadable::Loaded((1..8).map(artist).collect()),
         ..ArtistPage::default()
     };
@@ -3329,6 +3340,7 @@ mod tests {
                                 context: &context,
                                 show_cover: false,
                                 show_album: false,
+                                show_play_count: false,
                                 added_at: None,
                                 added_by: None,
                                 show_added_by: false,
@@ -3434,6 +3446,7 @@ mod tests {
                                     context: &context,
                                     show_cover: false,
                                     show_album: false,
+                                    show_play_count: false,
                                     added_at: None,
                                     added_by: None,
                                     show_added_by: false,
@@ -3554,6 +3567,7 @@ mod tests {
                                 context,
                                 show_cover: false,
                                 show_album: false,
+                                show_play_count: false,
                                 added_at: None,
                                 added_by: None,
                                 show_added_by: false,
@@ -4342,6 +4356,7 @@ mod tests {
                         context: &context,
                         show_cover: false,
                         show_album: false,
+                        show_play_count: false,
                         added_at: Some("2026-01-01T00:00:00Z"),
                         added_by: None,
                         show_added_by: false,
@@ -4386,17 +4401,84 @@ mod tests {
         app.backend.shutdown();
     }
 
+    #[test]
+    fn artist_popular_shows_stream_counts_without_changing_other_tables() {
+        fn artist(app: &mut App, ui: &mut egui::Ui) {
+            crate::ui::artist::show(app, ui, "art0");
+        }
+        fn album(app: &mut App, ui: &mut egui::Ui) {
+            crate::ui::collection::album(app, ui, "alb0");
+        }
+        let (ctx, mut app) = accessible_app("artist-stream-counts");
+        for palette in [
+            crate::theme::Palette::dark(),
+            crate::theme::Palette::light(),
+        ] {
+            app.palette = palette;
+            for thin in [false, true] {
+                app.settings.tracklist_compact = thin;
+                for width in [480.0, 640.0, 1280.0] {
+                    view_frame_size(&ctx, &mut app, vec![], artist, width);
+                    let painted = view_frame_size(&ctx, &mut app, vec![], artist, width);
+                    let count = painted.iter().find(|(label, _)| label == "1,234,567,890");
+                    assert_eq!(count.is_some(), width > 560.0);
+                    if let Some((_, rect)) = count {
+                        assert!(
+                            rect.left() > 200.0 && rect.right() < width - 100.0,
+                            "{rect:?}"
+                        );
+                    }
+                }
+            }
+        }
+        app.settings.tracklist_compact = false;
+        view_frame(&ctx, &mut app, vec![], artist);
+        let painted = view_frame(&ctx, &mut app, vec![], artist);
+        assert!(painted.iter().any(|(label, _)| label == "1,234,567,890"));
+        assert!(
+            !painted.iter().any(|(label, _)| label == "345,679,002"),
+            "collapsed Popular must keep five songs"
+        );
+        app.artist_pages.get_mut("art0").unwrap().show_all_top = true;
+        let painted = view_frame(&ctx, &mut app, vec![], artist);
+        assert!(painted.iter().any(|(label, _)| label == "345,679,002"));
+        let Loadable::Loaded(tracks) = &mut app.artist_pages.get_mut("art0").unwrap().top_tracks
+        else {
+            panic!("missing tracks")
+        };
+        tracks[0].play_count = None;
+        tracks[1].play_count = Some(0);
+        let painted = view_frame(&ctx, &mut app, vec![], artist);
+        assert!(!painted.iter().any(|(label, _)| label == "1,234,567,890"));
+        assert_eq!(painted.iter().filter(|(label, _)| label == "0").count(), 1);
+        let track = &mut app.album_pages.get_mut("alb0").unwrap().tracks.items[0];
+        track.play_count = Some(1_234_567_890);
+        let painted = view_frame(&ctx, &mut app, vec![], album);
+        assert!(!painted.iter().any(|(label, _)| label == "1,234,567,890"));
+        app.backend.shutdown();
+    }
+
     fn view_frame(
         ctx: &egui::Context,
         app: &mut App,
         events: Vec<egui::Event>,
         view: fn(&mut App, &mut egui::Ui),
     ) -> Vec<(String, egui::Rect)> {
+        view_frame_size(ctx, app, events, view, 1280.0)
+    }
+
+    fn view_frame_size(
+        ctx: &egui::Context,
+        app: &mut App,
+        events: Vec<egui::Event>,
+        view: fn(&mut App, &mut egui::Ui),
+        width: f32,
+    ) -> Vec<(String, egui::Rect)> {
         let mut output = ctx.run_ui(
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
-                    egui::vec2(1280.0, 2200.0),
+                    egui::vec2(width, 2200.0),
                 )),
                 events,
                 ..Default::default()

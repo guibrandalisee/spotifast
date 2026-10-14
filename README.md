@@ -42,6 +42,10 @@ radio recommendations use the first supplied track or artist seed. Internal
 query definitions can change and require a client update. See
 [How it connects](docs/_reference/how-it-connects.md).
 
+Artist pages show Spotify's total stream counts beside Popular songs when the
+native catalogue supplies them. The count column appears in wider song lists;
+missing counts stay blank. These counts reuse the existing artist overview request.
+
 Local playback prepares the selected song while its playlist resolves and uses
 the existing streaming buffers. The local log records playback startup timing
 without credentials. Audio quality and cache limits remain unchanged.

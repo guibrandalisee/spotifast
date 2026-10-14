@@ -293,6 +293,9 @@ pub struct Track {
     pub is_playable: Option<bool>,
     #[serde(default)]
     pub popularity: Option<u8>,
+    /// Total Spotify streams when supplied by native catalogue metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub play_count: Option<u64>,
     #[serde(default)]
     pub external_ids: ExternalIds,
     /// The originally requested track when Spotify substituted a playable

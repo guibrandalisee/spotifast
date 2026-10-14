@@ -209,6 +209,14 @@ failure may happen after Spotify has already applied the change. Queue appends
 keep their existing serialized order. Signing out cancels waiting account work.
 There is no fallback to the shared app or a second quota.
 
+## Artist stream counts
+
+Popular songs on an artist page display the total streams supplied in the
+native artist overview's `playcount` field. They use that existing request and
+its metadata cache, without separate reads for individual songs. Missing or
+invalid counts remain unknown rather than becoming zero. Narrow song lists
+hide the count column to preserve space for the title and playback controls.
+
 ## Podcasts on Home
 
 Since 0.10.0, Home's **Your podcasts** shelf reads the first page of
