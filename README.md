@@ -61,6 +61,9 @@ Cold queue metadata is read in batches of at most three under the global request
 limit. Duplicate songs share a read without changing their queue positions.
 The native metadata cache removes expired or least recently used entries instead
 of flushing at capacity, with limits of 500 entries and an estimated 32 MiB.
+Simultaneous catalogue reads with identical operation variables share their
+in-flight request. Cache invalidation separates new reads from older work,
+and failed or cancelled reads can be retried.
 
 ### Personal fork: offline playlists
 

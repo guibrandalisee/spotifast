@@ -6,6 +6,73 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
+use crate::api::client::Result;
+use std::sync::{Arc, Weak};
+use tokio::sync::Mutex;
+
+type Flight = Mutex<Option<Result<Value>>>;
+
+/// Weak entries live only while callers share a read. Cancellation releases
+/// the per-key lock; failures are shared with waiters but not cached for retry.
+#[derive(Default)]
+pub(super) struct SharedReads {
+    flights: std::sync::Mutex<HashMap<(u64, String), Weak<Flight>>>,
+}
+
+impl SharedReads {
+    pub(super) async fn read<F: std::future::Future<Output = Result<Value>>>(
+        &self,
+        cache: &Mutex<MetadataCache>,
+        key: String,
+        fetch: impl FnOnce() -> F,
+    ) -> Result<Value> {
+        let generation = {
+            let mut cache = cache.lock().await;
+            if let Some((_, value)) = cache.get(&key) {
+                return Ok(value.clone());
+            }
+            cache.generation
+        };
+        let flight = {
+            let mut flights = self.flights.lock().unwrap_or_else(|p| p.into_inner());
+            flights.retain(|_, flight| flight.strong_count() > 0);
+            let weak = flights.entry((generation, key.clone())).or_default();
+            match weak.upgrade() {
+                Some(flight) => flight,
+                None => {
+                    let flight = Arc::new(Mutex::new(None));
+                    *weak = Arc::downgrade(&flight);
+                    flight
+                }
+            }
+        };
+        let mut shared = flight.lock().await;
+        if let Some(result) = shared.as_ref() {
+            return result.clone();
+        }
+        // A different read may have completed between the initial lookup and
+        // acquiring this key's lock. Never hold the whole cache across I/O.
+        {
+            let mut cache = cache.lock().await;
+            if cache.generation == generation
+                && let Some((_, value)) = cache.get(&key)
+            {
+                return Ok(value.clone());
+            }
+        }
+        let result = fetch().await;
+        if let Ok(value) = &result {
+            let mut cache = cache.lock().await;
+            // A library write invalidates both cached and in-flight metadata.
+            if cache.generation == generation {
+                cache.insert(key, (Instant::now(), value.clone()));
+            }
+        }
+        *shared = Some(result.clone());
+        result
+    }
+}
+
 struct Entry {
     data: (Instant, Value),
     used: Instant,
@@ -13,6 +80,7 @@ struct Entry {
 }
 
 pub(super) struct MetadataCache {
+    generation: u64,
     entries: HashMap<String, Entry>,
     bytes: usize,
     max_entries: usize,
@@ -59,6 +127,7 @@ fn json_heap(value: &Value) -> usize {
 impl MetadataCache {
     fn new(max_entries: usize, max_bytes: usize) -> Self {
         Self {
+            generation: 0,
             entries: HashMap::new(),
             bytes: 0,
             max_entries,
@@ -126,6 +195,7 @@ impl MetadataCache {
     }
 
     pub(super) fn clear(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
         self.entries.clear();
         self.bytes = 0;
     }
@@ -135,6 +205,138 @@ impl MetadataCache {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn cache_hits_do_not_construct_the_network_future() {
+        let cache = Mutex::new(MetadataCache::default());
+        cache
+            .lock()
+            .await
+            .insert("track".into(), (Instant::now(), json!("cached")));
+        let reads = SharedReads::default();
+        let mut constructed = false;
+        let value = reads
+            .read(&cache, "track".into(), || {
+                constructed = true;
+                std::future::ready(Ok(json!("network")))
+            })
+            .await
+            .unwrap();
+        assert!(!constructed);
+        assert_eq!(value, json!("cached"));
+    }
+
+    #[tokio::test]
+    async fn identical_cold_reads_share_success_and_errors_without_poisoning_retries() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let cache = Mutex::new(MetadataCache::default());
+        let reads = SharedReads::default();
+        let calls = AtomicUsize::new(0);
+        for fail in [false, true] {
+            cache.lock().await.clear();
+            calls.store(0, Ordering::SeqCst);
+            let fetch = || async {
+                calls.fetch_add(1, Ordering::SeqCst);
+                tokio::task::yield_now().await;
+                if fail {
+                    Err(crate::api::ApiError::RateLimited)
+                } else {
+                    Ok(json!("track"))
+                }
+            };
+            let (a, b) = tokio::join!(
+                reads.read(&cache, "track".into(), fetch),
+                reads.read(&cache, "track".into(), fetch),
+            );
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            assert_eq!(a.is_err(), fail);
+            assert_eq!(b.is_err(), fail);
+        }
+        assert_eq!(
+            reads
+                .read(&cache, "track".into(), || async { Ok(json!("retry")) })
+                .await
+                .unwrap(),
+            json!("retry")
+        );
+    }
+
+    #[tokio::test]
+    async fn distinct_keys_run_concurrently() {
+        let cache = Mutex::new(MetadataCache::default());
+        let reads = SharedReads::default();
+        let barrier = tokio::sync::Barrier::new(2);
+        let fetch = || async {
+            barrier.wait().await;
+            Ok(json!(1))
+        };
+        let (a, b) = tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::join!(
+                reads.read(&cache, "a".into(), fetch),
+                reads.read(&cache, "b".into(), fetch)
+            )
+        })
+        .await
+        .unwrap();
+        assert!(a.is_ok() && b.is_ok());
+    }
+
+    #[tokio::test]
+    async fn invalidation_does_not_join_old_reads_or_restore_stale_values() {
+        let cache = Mutex::new(MetadataCache::default());
+        let reads = SharedReads::default();
+        let started = tokio::sync::Notify::new();
+        let finish = tokio::sync::Notify::new();
+        let (old, new) = tokio::join!(
+            reads.read(&cache, "track".into(), || async {
+                started.notify_one();
+                finish.notified().await;
+                Ok(json!("old"))
+            }),
+            async {
+                started.notified().await;
+                cache.lock().await.clear();
+                let new = reads
+                    .read(&cache, "track".into(), || async { Ok(json!("new")) })
+                    .await;
+                finish.notify_one();
+                new
+            },
+        );
+        assert_eq!(old.unwrap(), json!("old"));
+        assert_eq!(new.unwrap(), json!("new"));
+        assert_eq!(cache.lock().await.get("track").unwrap().1, json!("new"));
+    }
+
+    #[tokio::test]
+    async fn cancelled_owner_releases_key_for_waiters() {
+        let cache = Arc::new(Mutex::new(MetadataCache::default()));
+        let reads = Arc::new(SharedReads::default());
+        let started = Arc::new(tokio::sync::Notify::new());
+        let task = tokio::spawn({
+            let (cache, reads, started) = (cache.clone(), reads.clone(), started.clone());
+            async move {
+                reads
+                    .read(&cache, "track".into(), || async {
+                        started.notify_one();
+                        std::future::pending::<Result<Value>>().await
+                    })
+                    .await
+            }
+        });
+        started.notified().await;
+        task.abort();
+        let _ = task.await;
+        assert!(
+            tokio::time::timeout(
+                Duration::from_secs(2),
+                reads.read(&cache, "track".into(), || async { Ok(json!(1)) })
+            )
+            .await
+            .unwrap()
+            .is_ok()
+        );
+    }
 
     #[test]
     fn capacity_evicts_the_least_recently_read_entry_without_flushing_the_rest() {

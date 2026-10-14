@@ -38,6 +38,14 @@ collection and rootlist data still expire after thirty seconds. Playlist and
 library writes invalidate cached data as before. An oversized value is returned
 to its caller without being retained in the cache.
 
+Simultaneous reads of the same cacheable catalogue operation and variables
+share one in-flight request, including its result or error. Different keys
+remain independent under the existing global request limit. Cancelled reads
+release their key for another caller; errors are not retained for later retries.
+Library writes advance the cache generation, so new reads cannot join older
+work and an older catalogue response cannot repopulate the invalidated cache. A new
+signed-in session owns its own client and in-flight reads.
+
 Two data differences are explicit: native Recent imports the last track in each
 recently played context, while local playback history continues to accumulate
 individual plays. Native radio recommendations use the first supplied track or

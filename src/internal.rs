@@ -44,6 +44,7 @@ pub struct Client {
     requests: Semaphore,
     origin: std::sync::RwLock<String>,
     cache: Mutex<cache::MetadataCache>,
+    shared_reads: cache::SharedReads,
 }
 
 fn protocol_error() -> ApiError {
@@ -79,6 +80,7 @@ impl Client {
             requests: Semaphore::new(6),
             origin: std::sync::RwLock::new(String::new()),
             cache: Mutex::new(cache::MetadataCache::default()),
+            shared_reads: cache::SharedReads::default(),
         })
     }
 
@@ -461,18 +463,18 @@ impl Client {
                 | "queryArtistOverview"
         );
         let key = format!("{name}:{}", variables);
-        if cached
-            && let Some((time, value)) = self.cache.lock().await.get(&key)
-            && time.elapsed() < Duration::from_secs(300)
-        {
-            return Ok(value.clone());
-        }
-        let value = self.graphql(name, hash, variables).await?;
+        // Catalogue calls sit inside the typed API's large dispatch future.
+        // Keep authentication/protobuf state out of that future's stack frame,
+        // including when the read is nested inside the per-key coordinator.
         if cached {
-            let mut cache = self.cache.lock().await;
-            cache.insert(key, (Instant::now(), value.clone()));
+            return self
+                .shared_reads
+                .read(&self.cache, key, || {
+                    Box::pin(self.graphql(name, hash, variables))
+                })
+                .await;
         }
-        Ok(value)
+        Box::pin(self.graphql(name, hash, variables)).await
     }
 
     pub async fn rootlist(
