@@ -196,19 +196,16 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, page: Page) {
             );
         }
         _ => {
-            let episodes: Vec<_> = app
-                .library
-                .episodes
-                .items
-                .iter()
-                .map(|saved| saved.episode.clone())
-                .collect();
+            let episode_count = app.library.episodes.items.len();
             widgets::virtual_rows(
                 ui,
-                episodes.len(),
+                episode_count,
                 super::show::EPISODE_ROW_HEIGHT,
                 |ui, index| {
-                    super::show::episode_row(app, ui, &episodes[index], None);
+                    // Actions are applied after drawing, so indices stay stable.
+                    // Own only the visible row while the renderer borrows App.
+                    let episode = app.library.episodes.items[index].episode.clone();
+                    super::show::episode_row(app, ui, &episode, None);
                 },
             );
             let list = &app.library.episodes;

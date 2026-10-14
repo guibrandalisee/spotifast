@@ -448,16 +448,16 @@ fn queue_is_empty(app: &App) -> bool {
 
 fn recents_contents(app: &mut App, ui: &mut egui::Ui) {
     let palette = app.palette;
-    // Snapshot to avoid borrow issues while drawing. The rows are both
+    // The rows are both
     // histories as one: what was played here, which Spotify is never told
     // about, and what Spotify knows of every other device.
-    let items = app.recents_view.clone();
+    let item_count = app.recents_view.len();
     let loading = app.recents.loading;
     let error = app.recents.error.clone();
     let complete = app.recents.complete;
     let loaded_once = app.recents.loaded_once;
 
-    if items.is_empty() {
+    if item_count == 0 {
         if loading {
             widgets::loading_row(ui, &palette, app.locale);
             return;
@@ -517,11 +517,12 @@ fn recents_contents(app: &mut App, ui: &mut egui::Ui) {
 
     let row_height = theme::COMPACT_ROW_HEIGHT;
     // Build PlayableItems on the fly; virtual_rows needs stable index.
-    widgets::virtual_rows(ui, items.len(), row_height, |ui, index| {
-        let entry = &items[index];
-        // Need owned PlayableItem for track_row; clone track.
-        let item = PlayableItem::Track(entry.track.clone());
+    widgets::virtual_rows(ui, item_count, row_height, |ui, index| {
+        // Own just this visible row; actions cannot change the list until
+        // drawing ends. Avoid cloning the full history or cloning the track twice.
+        let entry = app.recents_view[index].clone();
         let context = RowContext::Uris(Arc::from([entry.track.uri.clone()]));
+        let item = PlayableItem::Track(entry.track);
         widgets::track_row(
             ui,
             app,

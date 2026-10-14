@@ -50,6 +50,8 @@ ready player. A remembered song alone does not open the device picker.
 
 Library sidebar rows are reused between repaints. Renames, permissions, folders,
 pins, search, ordering and language changes rebuild the prepared rows immediately.
+Episode and Recent views prepare only visible rows, avoiding full-list snapshots
+on each repaint.
 
 ### Personal fork: offline playlists
 
