@@ -26,12 +26,23 @@ pub struct TableRowsCache {
     pub playlist_owner: Option<(Option<String>, String)>,
     /// Set only when the next revision extends this cached playlist prefix.
     pub playlist_append_revision: Option<u64>,
+    /// Updated only when rows change, so enforcing a budget is constant-time
+    /// on an unchanged table hit.
+    pub estimated_bytes: usize,
 }
 
 impl TableRowsCache {
     /// Retained heap for this cache: nested track/episode metadata, not just
     /// the top-level URI and title.
     pub fn retained_bytes(&self) -> usize {
+        self.estimated_bytes
+    }
+
+    pub fn refresh_retained_bytes(&mut self) {
+        self.estimated_bytes = self.measure_retained_bytes();
+    }
+
+    fn measure_retained_bytes(&self) -> usize {
         std::mem::size_of::<Self>()
             + self.items.capacity() * std::mem::size_of::<TableItem>()
             + self.playlist_positions.as_ref().map_or(0, |positions| {
@@ -83,7 +94,7 @@ fn album_retained_bytes(album: &Album) -> usize {
             .sum::<usize>()
 }
 
-fn track_retained_bytes(track: &Track) -> usize {
+pub(crate) fn track_retained_bytes(track: &Track) -> usize {
     std::mem::size_of::<Track>()
         + track.name.len()
         + track.uri.len()
@@ -96,13 +107,25 @@ fn track_retained_bytes(track: &Track) -> usize {
         + track.album.as_ref().map(album_retained_bytes).unwrap_or(0)
 }
 
-fn episode_retained_bytes(episode: &Episode) -> usize {
+pub(crate) fn episode_retained_bytes(episode: &Episode) -> usize {
     std::mem::size_of::<Episode>()
         + episode.id.len()
         + episode.name.len()
         + episode.uri.len()
         + episode.description.len()
         + image_retained_bytes(&episode.images)
+}
+
+pub(crate) fn playlist_item_retained_bytes(item: &PlaylistItem) -> usize {
+    std::mem::size_of::<PlaylistItem>()
+        + item.item.as_ref().map_or(0, playable_retained_bytes)
+        + item.track.as_ref().map_or(0, playable_retained_bytes)
+        + item.added_at.as_ref().map_or(0, String::len)
+        + item
+            .added_by
+            .as_ref()
+            .and_then(|user| user.id.as_ref())
+            .map_or(0, String::len)
 }
 
 /// Every screen the central panel can show.
@@ -297,6 +320,44 @@ impl<T> Default for PagedList<T> {
 }
 
 impl<T> PagedList<T> {
+    /// Discard the most distant inactive windows until their estimated heap
+    /// fits the budget. Keep the visible window, offsets and pending reads intact.
+    pub fn prune_windows(&mut self, budget: usize, estimate: impl Fn(&T) -> usize) {
+        let mut windows: Vec<_> = self
+            .windows
+            .iter()
+            .map(|(offset, items)| {
+                let bytes = items.capacity() * std::mem::size_of::<T>()
+                    + items.iter().map(&estimate).sum::<usize>();
+                (*offset, bytes)
+            })
+            .collect();
+        let mut bytes: usize = windows.iter().map(|(_, bytes)| bytes).sum();
+        if bytes <= budget {
+            return;
+        }
+        windows.sort_by_key(|(offset, _)| std::cmp::Reverse(offset.abs_diff(self.base_offset)));
+        for (offset, freed) in windows {
+            if bytes <= budget {
+                break;
+            }
+            self.windows.remove(&offset);
+            bytes = bytes.saturating_sub(freed);
+        }
+    }
+
+    pub fn estimated_bytes(&self, estimate: impl Fn(&T) -> usize) -> usize {
+        self.items.capacity() * std::mem::size_of::<T>()
+            + self.items.iter().map(&estimate).sum::<usize>()
+            + self
+                .windows
+                .values()
+                .map(|items| {
+                    items.capacity() * std::mem::size_of::<T>()
+                        + items.iter().map(&estimate).sum::<usize>()
+                })
+                .sum::<usize>()
+    }
     /// Select a cached window, or reserve a direct request for the visible row.
     /// Adjacent windows merge on arrival, so a viewport can cross page edges.
     pub fn window_at(&mut self, position: u32, size: u32) -> Option<u32> {
@@ -1207,6 +1268,35 @@ pub enum Action {
 #[cfg(test)]
 mod finite_scroll_tests {
     use super::*;
+
+    #[test]
+    fn window_budget_discards_distant_rows_without_changing_the_visible_request() {
+        let mut list = PagedList::default();
+        list.absorb(0, page(0, 50, 1000));
+        list.window_at(700, 50);
+        list.absorb(700, page(700, 50, 1000));
+        list.window_at(900, 50);
+        list.absorb(900, page(900, 50, 1000));
+        let visible = list.items.clone();
+        let revision = list.revision;
+        list.window_at(950, 50);
+        let budget = 50 * std::mem::size_of::<u32>();
+        list.prune_windows(budget, |_| 0);
+        assert!(!list.windows.contains_key(&0));
+        assert!(list.windows.contains_key(&700));
+        assert_eq!(list.items, visible);
+        assert_eq!(list.base_offset, 900);
+        assert_eq!(list.total, Some(1000));
+        assert_eq!(list.window_request, Some(950));
+        assert!(list.loading);
+        assert_eq!(list.revision, revision);
+        list.absorb(950, page(950, 50, 1000));
+        assert_eq!(
+            list.window_at(10, 50),
+            Some(0),
+            "evicted rows are fetched at their original server offset"
+        );
+    }
 
     fn page(offset: u32, count: u32, total: u32) -> Page_<u32> {
         Page_ {

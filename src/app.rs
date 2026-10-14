@@ -2508,6 +2508,7 @@ impl App {
     /// Drop table-row caches whose pages are gone, and cap what remains.
     pub fn retain_table_rows(&mut self, current: &Page) {
         const MAX_TABLE_ROW_CACHES: usize = 2;
+        const TABLE_CACHE_BUDGET: usize = 16 * 1024 * 1024;
         self.table_rows.retain(|page, _| {
             page == current
                 || match page {
@@ -2517,7 +2518,9 @@ impl App {
                     _ => false,
                 }
         });
-        if self.table_rows.len() <= MAX_TABLE_ROW_CACHES {
+        if self.table_rows.len() <= MAX_TABLE_ROW_CACHES
+            && self.table_rows_retained_bytes() <= TABLE_CACHE_BUDGET
+        {
             return;
         }
         let mut keep = HashSet::from([current.clone()]);
@@ -2529,7 +2532,9 @@ impl App {
         {
             keep.insert(page.clone());
         }
-        self.table_rows.retain(|page, _| keep.contains(page));
+        if self.table_rows.len() > MAX_TABLE_ROW_CACHES {
+            self.table_rows.retain(|page, _| keep.contains(page));
+        }
         while self.table_rows.len() > MAX_TABLE_ROW_CACHES {
             let drop = self
                 .table_rows
@@ -2542,6 +2547,11 @@ impl App {
                 }
                 None => break,
             }
+        }
+        if self.table_rows_retained_bytes() > TABLE_CACHE_BUDGET {
+            // The current table stays prepared even if it exceeds the budget;
+            // dropping it would reconstruct every row on the next repaint.
+            self.table_rows.retain(|page, _| page == current);
         }
     }
 
@@ -6915,6 +6925,47 @@ impl App {
             &protected_albums,
             MAX_ALBUM_PAGES,
         );
+        const WINDOW_CACHE_BUDGET: usize = 4 * 1024 * 1024;
+        const PAGE_CACHE_BUDGET: usize = 24 * 1024 * 1024;
+        for page in self.playlist_pages.values_mut() {
+            if page.pending_writes == 0 && page.optimistic_snapshot.is_none() {
+                page.items.prune_windows(
+                    WINDOW_CACHE_BUDGET,
+                    crate::model::playlist_item_retained_bytes,
+                );
+            }
+        }
+        for page in self.album_pages.values_mut() {
+            page.tracks
+                .prune_windows(WINDOW_CACHE_BUDGET, crate::model::track_retained_bytes);
+        }
+        self.library
+            .liked
+            .prune_windows(WINDOW_CACHE_BUDGET, |saved| {
+                crate::model::track_retained_bytes(&saved.track)
+            });
+        evict_lru_bytes(
+            &mut self.playlist_pages,
+            &self.page_used,
+            |id| Page::Playlist(id.into()),
+            &protected_playlists,
+            PAGE_CACHE_BUDGET,
+            |page| {
+                page.items
+                    .estimated_bytes(crate::model::playlist_item_retained_bytes)
+            },
+        );
+        evict_lru_bytes(
+            &mut self.album_pages,
+            &self.page_used,
+            |id| Page::Album(id.into()),
+            &protected_albums,
+            PAGE_CACHE_BUDGET,
+            |page| {
+                page.tracks
+                    .estimated_bytes(crate::model::track_retained_bytes)
+            },
+        );
         evict_lru_map(
             &mut self.artist_pages,
             &self.page_used,
@@ -11267,6 +11318,34 @@ fn evict_lru_map<V>(
     }
 }
 
+fn evict_lru_bytes<V>(
+    map: &mut HashMap<String, V>,
+    used: &HashMap<Page, Instant>,
+    to_page: impl Fn(&str) -> Page,
+    protected: &HashSet<String>,
+    budget: usize,
+    estimate: impl Fn(&V) -> usize,
+) {
+    let mut sizes: Vec<_> = map
+        .iter()
+        .map(|(id, value)| (used.get(&to_page(id)).copied(), id.clone(), estimate(value)))
+        .collect();
+    let mut bytes: usize = sizes.iter().map(|(_, _, bytes)| bytes).sum();
+    if bytes <= budget {
+        return;
+    }
+    sizes.sort();
+    for (_, id, freed) in sizes {
+        if bytes <= budget {
+            break;
+        }
+        if !protected.contains(&id) {
+            map.remove(&id);
+            bytes = bytes.saturating_sub(freed);
+        }
+    }
+}
+
 fn cover_images(cover: &crate::playlist_cover::Cover) -> Vec<crate::api::models::Image> {
     vec![crate::api::models::Image {
         url: cover.uri.clone(),
@@ -11306,6 +11385,43 @@ mod tests {
     use crate::api::models::{
         Episode, Image, Page as ApiPage, ResumePoint, SavedEpisode, SavedTrack, SearchResults,
     };
+
+    #[test]
+    fn metadata_budget_evicts_cold_pages_but_keeps_visible_and_pending_edits() {
+        let mut pages: HashMap<String, usize> = [
+            ("visible", 100),
+            ("writing", 100),
+            ("old", 100),
+            ("recent", 50),
+        ]
+        .into_iter()
+        .map(|(id, bytes)| (id.into(), bytes))
+        .collect();
+        let now = Instant::now();
+        let used = HashMap::from([(Page::Playlist("recent".into()), now)]);
+        let protected = HashSet::from(["visible".into(), "writing".into()]);
+        evict_lru_bytes(
+            &mut pages,
+            &used,
+            |id| Page::Playlist(id.into()),
+            &protected,
+            250,
+            |bytes| *bytes,
+        );
+        assert!(!pages.contains_key("old"));
+        assert!(pages.contains_key("recent"));
+        evict_lru_bytes(
+            &mut pages,
+            &used,
+            |id| Page::Playlist(id.into()),
+            &protected,
+            1,
+            |bytes| *bytes,
+        );
+        assert_eq!(pages.len(), 2);
+        assert!(pages.contains_key("visible"));
+        assert!(pages.contains_key("writing"));
+    }
 
     #[test]
     fn offline_controls_work_while_the_account_is_reconnecting() {

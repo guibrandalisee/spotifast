@@ -609,20 +609,20 @@ pub fn remember_table_items(
     items: Vec<TableItem>,
 ) -> Arc<Vec<TableItem>> {
     let items = Arc::new(items);
-    app.table_rows.insert(
-        page.clone(),
-        TableRowsCache {
-            generation,
-            items_revision,
-            user_names_revision,
-            items: Arc::clone(&items),
-            playlist_positions: None,
-            playlist_raw_count: 0,
-            playlist_duration_ms: 0,
-            playlist_owner: None,
-            playlist_append_revision: None,
-        },
-    );
+    let mut cache = TableRowsCache {
+        generation,
+        items_revision,
+        user_names_revision,
+        items: Arc::clone(&items),
+        playlist_positions: None,
+        playlist_raw_count: 0,
+        playlist_duration_ms: 0,
+        playlist_owner: None,
+        playlist_append_revision: None,
+        estimated_bytes: 0,
+    };
+    cache.refresh_retained_bytes();
+    app.table_rows.insert(page.clone(), cache);
     app.retain_table_rows(&page);
     items
 }
@@ -1441,6 +1441,7 @@ pub(crate) fn playlist_cached_table_items(
                 Arc::clone(positions),
                 cache.playlist_duration_ms,
             );
+            cache.refresh_retained_bytes();
             app.retain_table_rows(&key);
             return result;
         }
@@ -1455,7 +1456,9 @@ pub(crate) fn playlist_cached_table_items(
         cache.playlist_raw_count = list.items.len();
         cache.playlist_duration_ms = duration_ms;
         cache.playlist_owner = Some((owner_id.map(str::to_string), owner_name.to_string()));
+        cache.refresh_retained_bytes();
     }
+    app.retain_table_rows(&key);
     (items, positions, duration_ms)
 }
 

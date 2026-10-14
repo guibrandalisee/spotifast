@@ -52,6 +52,11 @@ Library sidebar rows are reused between repaints. Renames, permissions, folders,
 pins, search, ordering and language changes rebuild the prepared rows immediately.
 Episode and Recent views prepare only visible rows, avoiding full-list snapshots
 on each repaint.
+Metadata caches also use estimated byte budgets: inactive paging windows keep
+up to 4 MiB per list, playlist and album page caches target 24 MiB each, and
+prepared tables target 16 MiB. The visible table/page, playing context and pending
+playlist edits stay protected. Returning to discarded data can require a new read;
+these budgets do not cap the whole app's RAM.
 
 ### Personal fork: offline playlists
 
