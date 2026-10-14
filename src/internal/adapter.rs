@@ -4,6 +4,48 @@ use crate::api::client::Result;
 use reqwest::Method;
 use serde_json::{Value, json};
 
+const QUEUE_READ_CONCURRENCY: usize = 3;
+
+fn queue_metadata_uris(state: &Value) -> Vec<&str> {
+    let mut seen = std::collections::HashSet::new();
+    std::iter::once(text(at(state, "/track/uri")))
+        .filter(|uri| !uri.is_empty())
+        .chain(
+            items(&state["next_tracks"])
+                .iter()
+                .map(|track| text(&track["uri"]))
+                .filter(|uri| {
+                    uri.starts_with("spotify:track:") || uri.starts_with("spotify:episode:")
+                }),
+        )
+        .filter(|uri| seen.insert(*uri))
+        .collect()
+}
+
+// Scoped futures share the existing client and global request limiter. Small
+// ordered batches avoid unbounded fan-out and changes to queue ordering.
+async fn ordered_reads<'a, T, F, Fut>(uris: &[&'a str], read: F) -> Result<Vec<T>>
+where
+    F: Fn(&'a str) -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    let mut values = Vec::with_capacity(uris.len());
+    for batch in uris.chunks(QUEUE_READ_CONCURRENCY) {
+        let optional = |index: usize| {
+            let read = &read;
+            async move {
+                Ok::<Option<T>, crate::api::ApiError>(match batch.get(index) {
+                    Some(uri) => Some(read(uri).await?),
+                    None => None,
+                })
+            }
+        };
+        let (first, second, third) = tokio::join!(optional(0), optional(1), optional(2));
+        values.extend([first?, second?, third?].into_iter().flatten());
+    }
+    Ok(values)
+}
+
 fn at<'a>(value: &'a Value, path: &str) -> &'a Value {
     value.pointer(path).unwrap_or(&Value::Null)
 }
@@ -667,21 +709,26 @@ impl Client {
             if !path.ends_with("/queue") && active_cluster_device(&cluster).is_none() {
                 return Ok(Value::Null);
             }
+            if path.ends_with("/queue") {
+                let uris = queue_metadata_uris(state);
+                let values = ordered_reads(&uris, |uri| self.playable(uri)).await?;
+                let metadata: std::collections::HashMap<_, _> =
+                    uris.into_iter().zip(values).collect();
+                let current = metadata
+                    .get(text(at(state, "/track/uri")))
+                    .unwrap_or(&Value::Null);
+                // Duplicates stay in the queue, but metadata is read once.
+                let queue: Vec<_> = items(&state["next_tracks"])
+                    .iter()
+                    .filter_map(|track| metadata.get(text(&track["uri"])))
+                    .collect();
+                return Ok(json!({"currently_playing":current,"queue":queue}));
+            }
             let current = if text(at(state, "/track/uri")).is_empty() {
                 Value::Null
             } else {
                 self.playable(text(at(state, "/track/uri"))).await?
             };
-            if path.ends_with("/queue") {
-                let mut queue = Vec::new();
-                for track in items(&state["next_tracks"]) {
-                    let uri = text(&track["uri"]);
-                    if uri.starts_with("spotify:track:") || uri.starts_with("spotify:episode:") {
-                        queue.push(self.playable(uri).await?);
-                    }
-                }
-                return Ok(json!({"currently_playing":current,"queue":queue}));
-            }
             if current.is_null() {
                 return Ok(Value::Null);
             }
@@ -976,6 +1023,66 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn queue_reads_overlap_with_a_bound_and_keep_order() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let active = AtomicUsize::new(0);
+        let peak = AtomicUsize::new(0);
+        let values = ordered_reads(&["slow", "fast", "third", "tail"], |uri| {
+            let active = &active;
+            let peak = &peak;
+            async move {
+                let count = active.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(count, Ordering::SeqCst);
+                tokio::time::sleep(std::time::Duration::from_millis(if uri == "slow" {
+                    10
+                } else {
+                    1
+                }))
+                .await;
+                active.fetch_sub(1, Ordering::SeqCst);
+                Ok(uri)
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(values, ["slow", "fast", "third", "tail"]);
+        assert_eq!(peak.load(Ordering::SeqCst), QUEUE_READ_CONCURRENCY);
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn failed_queue_batch_stops_before_scheduling_more_requests() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let requests = AtomicUsize::new(0);
+        let result = ordered_reads(&["fail", "two", "three", "not fetched"], |uri| {
+            let requests = &requests;
+            async move {
+                requests.fetch_add(1, Ordering::SeqCst);
+                if uri == "fail" {
+                    Err(crate::api::ApiError::RateLimited)
+                } else {
+                    Ok(uri)
+                }
+            }
+        })
+        .await;
+        assert!(matches!(result, Err(crate::api::ApiError::RateLimited)));
+        assert_eq!(requests.load(Ordering::SeqCst), QUEUE_READ_CONCURRENCY);
+    }
+
+    #[test]
+    fn queue_metadata_deduplicates_current_and_next_without_fetching_local_files() {
+        let state = json!({"track":{"uri":"spotify:track:a"}, "next_tracks":[
+            {"uri":"spotify:track:a"}, {"uri":"spotify:episode:b"},
+            {"uri":"spotify:local:file"}, {"uri":"spotify:track:a"}
+        ]});
+        assert_eq!(
+            queue_metadata_uris(&state),
+            ["spotify:track:a", "spotify:episode:b"]
+        );
+    }
     #[test]
     fn remembered_song_without_a_registered_active_device_is_not_playback() {
         for active in [Value::Null, json!(""), json!("gone")] {

@@ -26,6 +26,11 @@ Tokens and authorization responses are never logged or saved in plain files.
 Queries fail explicitly if Spotify changes an operation rather than switching
 to another application or quota.
 
+Queue metadata reads use ordered batches of at most three requests under the
+existing global limit. Repeated songs share one metadata read per snapshot,
+while their repeated positions remain in the shown queue. An error stops
+later batches. Queue writes retain their serial ordering.
+
 Two data differences are explicit: native Recent imports the last track in each
 recently played context, while local playback history continues to accumulate
 individual plays. Native radio recommendations use the first supplied track or

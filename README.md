@@ -57,6 +57,8 @@ up to 4 MiB per list, playlist and album page caches target 24 MiB each, and
 prepared tables target 16 MiB. The visible table/page, playing context and pending
 playlist edits stay protected. Returning to discarded data can require a new read;
 these budgets do not cap the whole app's RAM.
+Cold queue metadata is read in batches of at most three under the global request
+limit. Duplicate songs share a read without changing their queue positions.
 
 ### Personal fork: offline playlists
 
