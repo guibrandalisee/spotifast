@@ -1,5 +1,8 @@
 //! The left panel: navigation and Your Library.
 
+use std::hash::{Hash, Hasher};
+use std::sync::Arc;
+
 use egui::{Align, CornerRadius, Frame, Layout, Margin, Rect, Sense, Vec2, pos2, vec2};
 
 use crate::api::models::pick_image;
@@ -33,6 +36,174 @@ struct Entry {
     /// How deep inside folders the row sits, for the indent.
     depth: u8,
     added_at: Option<i64>,
+}
+
+pub(crate) struct EntriesCache {
+    fingerprint: u64,
+    prepared: Arc<PreparedEntries>,
+}
+
+struct PreparedEntries {
+    entries: Vec<Entry>,
+    loading: bool,
+    error: Option<String>,
+    more_page: Option<Page>,
+}
+
+// Read only the fields that affect prepared rows. Hashing borrowed strings
+// avoids retaining another copy of the library just to validate this cache.
+fn entries_fingerprint(app: &App, shelf: Filter, sort: LibrarySort, needle: &str) -> u64 {
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    (
+        std::mem::discriminant(&shelf),
+        std::mem::discriminant(&sort),
+        std::mem::discriminant(&app.locale),
+        app.user_id(),
+        needle,
+        &app.settings.pinned_contexts,
+        app.settings.liked_songs_pinned,
+        &app.settings.sidebar_order,
+        &app.recent_contexts,
+    )
+        .hash(&mut hash);
+    let images = |images: &[crate::api::models::Image],
+                  hash: &mut std::collections::hash_map::DefaultHasher| {
+        (
+            pick_image(images, 64),
+            pick_image(images, super::GRID_ART_TARGET_WIDTH),
+        )
+            .hash(hash);
+    };
+    match shelf {
+        Filter::Playlists => {
+            app.library.liked.total.hash(&mut hash);
+            app.collapsed_folders.hash(&mut hash);
+            for row in &app.rootlist {
+                std::mem::discriminant(row).hash(&mut hash);
+                match row {
+                    crate::player::RootlistEntry::Playlist(uri) => uri.hash(&mut hash),
+                    crate::player::RootlistEntry::FolderStart { id, name } => {
+                        (id, name).hash(&mut hash)
+                    }
+                    crate::player::RootlistEntry::FolderEnd => {}
+                }
+            }
+            std::mem::discriminant(&app.library.playlists).hash(&mut hash);
+            if let Loadable::Failed(error) = &app.library.playlists {
+                error.hash(&mut hash);
+            }
+            if let Some(playlists) = app.library.playlists.get() {
+                playlists.len().hash(&mut hash);
+                for playlist in playlists {
+                    (
+                        &playlist.id,
+                        &playlist.uri,
+                        &playlist.name,
+                        playlist.owner_name(),
+                        playlist.owned_by(app.user_id().unwrap_or("")),
+                        app.can_edit_playlist(playlist),
+                    )
+                        .hash(&mut hash);
+                    images(&playlist.images, &mut hash);
+                }
+            }
+        }
+        Filter::Albums => {
+            let list = &app.library.albums;
+            (
+                list.revision,
+                list.loading,
+                &list.error,
+                list.can_load_more(),
+                list.items.len(),
+            )
+                .hash(&mut hash);
+            for saved in &list.items {
+                let album = &saved.album;
+                (
+                    &album.id,
+                    &album.uri,
+                    &album.name,
+                    &saved.added_at,
+                    app.album_kind_label(album).as_ref(),
+                )
+                    .hash(&mut hash);
+                for artist in &album.artists {
+                    artist.name.hash(&mut hash);
+                }
+                images(&album.images, &mut hash);
+            }
+        }
+        Filter::Artists => {
+            let list = &app.library.artists;
+            (
+                list.loading,
+                &list.error,
+                list.can_load_more(),
+                list.items.len(),
+            )
+                .hash(&mut hash);
+            for artist in &list.items {
+                (&artist.id, &artist.uri, &artist.name).hash(&mut hash);
+                images(&artist.images, &mut hash);
+            }
+        }
+        Filter::Podcasts => {
+            let list = &app.library.shows;
+            (
+                list.revision,
+                list.loading,
+                &list.error,
+                list.can_load_more(),
+                list.items.len(),
+            )
+                .hash(&mut hash);
+            for saved in &list.items {
+                let show = &saved.show;
+                (
+                    &show.id,
+                    &show.uri,
+                    &show.name,
+                    &show.publisher,
+                    &saved.added_at,
+                    app.audiobook_shows.contains(&show.uri),
+                )
+                    .hash(&mut hash);
+                images(&show.images, &mut hash);
+            }
+        }
+    }
+    hash.finish()
+}
+
+fn prepared_entries(
+    app: &mut App,
+    shelf: Filter,
+    sort: LibrarySort,
+    needle: &str,
+) -> Arc<PreparedEntries> {
+    let fingerprint = entries_fingerprint(app, shelf, sort, needle);
+    if let Some(cache) = &app.sidebar_entries
+        && cache.fingerprint == fingerprint
+    {
+        return Arc::clone(&cache.prepared);
+    }
+    let prepared = Arc::new(build_entries(app, shelf, sort, needle));
+    app.sidebar_entries = Some(EntriesCache {
+        fingerprint,
+        prepared: Arc::clone(&prepared),
+    });
+    prepared
+}
+
+fn first_ranks<'a>(
+    keys: impl Iterator<Item = &'a str>,
+) -> std::collections::HashMap<&'a str, usize> {
+    let mut ranks = std::collections::HashMap::new();
+    for (index, key) in keys.enumerate() {
+        ranks.entry(key).or_insert(index);
+    }
+    ranks
 }
 
 impl Entry {
@@ -424,42 +595,54 @@ fn order_entries(app: &App, shelf: Filter, sort: LibrarySort, entries: &mut [Ent
         LibrarySort::Name => {
             entries.sort_by_cached_key(|entry| (entry.name.to_lowercase(), entry.uri.clone()))
         }
-        LibrarySort::RecentlyPlayed => entries.sort_by_key(|entry| {
-            app.recent_contexts
-                .iter()
-                .position(|held| {
-                    if entry.liked {
-                        app.user_id()
-                            .is_some_and(|id| held == &format!("spotify:user:{id}:collection"))
+        LibrarySort::RecentlyPlayed => {
+            let ranks = first_ranks(app.recent_contexts.iter().map(String::as_str));
+            let liked = app
+                .user_id()
+                .map(|id| format!("spotify:user:{id}:collection"));
+            entries.sort_by_cached_key(|entry| {
+                ranks
+                    .get(if entry.liked {
+                        liked.as_deref().unwrap_or("")
                     } else {
-                        held == &entry.uri
-                    }
-                })
-                .unwrap_or(usize::MAX)
-        }),
+                        &entry.uri
+                    })
+                    .copied()
+                    .unwrap_or(usize::MAX)
+            });
+        }
         LibrarySort::RecentlyAdded => entries
             .sort_by_key(|entry| (entry.added_at.is_none(), std::cmp::Reverse(entry.added_at))),
-        LibrarySort::Local => entries.sort_by_key(|entry| {
-            match app
-                .settings
-                .sidebar_order
-                .iter()
-                .position(|held| held == entry.ordering_key())
-            {
-                Some(rank) => (1, rank),
+        LibrarySort::Local => {
+            let ranks = first_ranks(app.settings.sidebar_order.iter().map(String::as_str));
+            entries.sort_by_cached_key(|entry| match ranks.get(entry.ordering_key()) {
+                Some(rank) => (1, *rank),
                 None => (0, entry.playlist_index.unwrap_or(0)),
-            }
-        }),
+            });
+        }
         LibrarySort::Spotify if !entries.iter().any(|entry| entry.folder.is_some()) => {
-            entries.sort_by_key(|entry| (entry.liked, app.rootlist.iter().position(|row| matches!(row, crate::player::RootlistEntry::Playlist(uri) if uri == &entry.uri)).unwrap_or(usize::MAX)));
+            let mut ranks = std::collections::HashMap::new();
+            for (index, row) in app.rootlist.iter().enumerate() {
+                if let crate::player::RootlistEntry::Playlist(uri) = row {
+                    ranks.entry(uri.as_str()).or_insert(index);
+                }
+            }
+            entries.sort_by_cached_key(|entry| {
+                (
+                    entry.liked,
+                    ranks.get(entry.uri.as_str()).copied().unwrap_or(usize::MAX),
+                )
+            });
         }
         LibrarySort::Spotify => entries.sort_by_key(|entry| entry.liked),
         LibrarySort::Library => {}
     }
     let pins = app.settings.library_pins();
-    entries.sort_by_key(|entry| {
-        pins.iter()
-            .position(|held| held == entry.ordering_key())
+    let ranks = first_ranks(pins.iter().map(String::as_str));
+    entries.sort_by_cached_key(|entry| {
+        ranks
+            .get(entry.ordering_key())
+            .copied()
             .unwrap_or(usize::MAX)
     });
     if shelf == Filter::Playlists {
@@ -468,6 +651,162 @@ fn order_entries(app: &App, shelf: Filter, sort: LibrarySort, entries: &mut [Ent
                 entry.depth = 0;
             }
         }
+    }
+}
+
+fn build_entries(app: &App, filter: Filter, sort: LibrarySort, needle: &str) -> PreparedEntries {
+    let locale = app.locale;
+    let user_id = app.user_id().unwrap_or("").to_string();
+    let mut entries: Vec<Entry> = Vec::new();
+    let mut loading = false;
+    let mut error: Option<String> = None;
+    let mut more_page: Option<Page> = None;
+    match filter {
+        Filter::Playlists => {
+            let liked = liked_entry(app);
+            if needle.is_empty() || liked.name.to_lowercase().contains(needle) {
+                entries.push(liked);
+            }
+            let show_folders = sort == LibrarySort::Spotify && needle.is_empty();
+            if show_folders {
+                folder_rows(app, &user_id, &mut entries);
+            }
+            match &app.library.playlists {
+                Loadable::Loaded(_) if show_folders => {}
+                Loadable::Loaded(playlists) => {
+                    for (index, playlist) in playlists.iter().enumerate() {
+                        if !needle.is_empty() && !playlist.name.to_lowercase().contains(needle) {
+                            continue;
+                        }
+                        entries.push(playlist_entry(
+                            locale,
+                            playlist,
+                            index,
+                            &user_id,
+                            app.can_edit_playlist(playlist),
+                            0,
+                        ));
+                    }
+                }
+                Loadable::Loading | Loadable::NotLoaded => loading = true,
+                Loadable::Failed(message) => error = Some(message.clone()),
+            }
+        }
+        Filter::Albums => {
+            for saved in &app.library.albums.items {
+                let album = &saved.album;
+                if !needle.is_empty()
+                    && !album.name.to_lowercase().contains(needle)
+                    && !album
+                        .artists
+                        .iter()
+                        .any(|a| a.name.to_lowercase().contains(needle))
+                {
+                    continue;
+                }
+                let artists = crate::api::models::join_names(
+                    album.artists.iter().map(|artist| artist.name.as_str()),
+                );
+                entries.push(Entry {
+                    image: pick_image(&album.images, 64).map(str::to_string),
+                    grid_image: pick_image(&album.images, super::GRID_ART_TARGET_WIDTH)
+                        .map(str::to_string),
+                    name: album.name.clone(),
+                    subtitle: format!("{} • {artists}", app.album_kind_label(album)),
+                    grid_subtitle: artists,
+                    page: Page::Album(album.id.clone()),
+                    uri: album.uri.clone(),
+                    round: false,
+                    liked: false,
+                    owned: false,
+                    editable: false,
+                    playlist_index: None,
+                    folder: None,
+                    depth: 0,
+                    added_at: saved_time(saved.added_at.as_deref()),
+                });
+            }
+            loading = app.library.albums.loading && app.library.albums.items.is_empty();
+            error = app.library.albums.error.clone();
+            if app.library.albums.error.is_none() && app.library.albums.can_load_more() {
+                more_page = Some(Page::Albums);
+            }
+        }
+        Filter::Artists => {
+            for artist in &app.library.artists.items {
+                if !needle.is_empty() && !artist.name.to_lowercase().contains(needle) {
+                    continue;
+                }
+                entries.push(Entry {
+                    image: pick_image(&artist.images, 64).map(str::to_string),
+                    grid_image: pick_image(&artist.images, super::GRID_ART_TARGET_WIDTH)
+                        .map(str::to_string),
+                    name: artist.name.clone(),
+                    subtitle: gettext(locale, "Artist").into_owned(),
+                    grid_subtitle: String::new(),
+                    page: Page::Artist(artist.id.clone()),
+                    uri: artist.uri.clone(),
+                    round: true,
+                    liked: false,
+                    owned: false,
+                    editable: false,
+                    playlist_index: None,
+                    folder: None,
+                    depth: 0,
+                    added_at: None,
+                });
+            }
+            loading = app.library.artists.loading && app.library.artists.items.is_empty();
+            error = app.library.artists.error.clone();
+            if app.library.artists.error.is_none() && app.library.artists.can_load_more() {
+                more_page = Some(Page::Artists);
+            }
+        }
+        Filter::Podcasts => {
+            for saved in &app.library.shows.items {
+                let show = &saved.show;
+                // Audiobooks arrive as shows, but librespot can't play them.
+                if app.audiobook_shows.contains(&show.uri) {
+                    continue;
+                }
+                if !needle.is_empty() && !show.name.to_lowercase().contains(needle) {
+                    continue;
+                }
+                entries.push(Entry {
+                    image: pick_image(&show.images, 64).map(str::to_string),
+                    grid_image: pick_image(&show.images, super::GRID_ART_TARGET_WIDTH)
+                        .map(str::to_string),
+                    name: show.name.clone(),
+                    // Translators: {publisher} is the podcast's publisher.
+                    subtitle: gettext(locale, "Podcast • {publisher}")
+                        .replace("{publisher}", &show.publisher),
+                    grid_subtitle: show.publisher.clone(),
+                    page: Page::Show(show.id.clone()),
+                    uri: show.uri.clone(),
+                    round: false,
+                    liked: false,
+                    owned: false,
+                    editable: false,
+                    playlist_index: None,
+                    folder: None,
+                    depth: 0,
+                    added_at: saved_time(saved.added_at.as_deref()),
+                });
+            }
+            loading = app.library.shows.loading && app.library.shows.items.is_empty();
+            error = app.library.shows.error.clone();
+            if app.library.shows.error.is_none() && app.library.shows.can_load_more() {
+                more_page = Some(Page::Podcasts);
+            }
+        }
+    }
+
+    order_entries(app, filter, sort, &mut entries);
+    PreparedEntries {
+        entries,
+        loading,
+        error,
+        more_page,
     }
 }
 
@@ -1025,152 +1364,11 @@ fn contents(app: &mut App, ui: &mut egui::Ui, grid_art: Option<Rect>) {
     }
 
     let needle = app.library.filter.trim().to_lowercase();
-    let user_id = app.user_id().unwrap_or("").to_string();
-    let mut entries: Vec<Entry> = Vec::new();
-    let mut loading = false;
-    let mut error: Option<String> = None;
-    let mut more_page: Option<Page> = None;
-    match filter {
-        Filter::Playlists => {
-            let liked = liked_entry(app);
-            if needle.is_empty() || liked.name.to_lowercase().contains(&needle) {
-                entries.push(liked);
-            }
-            let show_folders = sort == LibrarySort::Spotify && needle.is_empty();
-            if show_folders {
-                folder_rows(app, &user_id, &mut entries);
-            }
-            match &app.library.playlists {
-                Loadable::Loaded(_) if show_folders => {}
-                Loadable::Loaded(playlists) => {
-                    for (index, playlist) in playlists.iter().enumerate() {
-                        if !needle.is_empty() && !playlist.name.to_lowercase().contains(&needle) {
-                            continue;
-                        }
-                        entries.push(playlist_entry(
-                            locale,
-                            playlist,
-                            index,
-                            &user_id,
-                            app.can_edit_playlist(playlist),
-                            0,
-                        ));
-                    }
-                }
-                Loadable::Loading | Loadable::NotLoaded => loading = true,
-                Loadable::Failed(message) => error = Some(message.clone()),
-            }
-        }
-        Filter::Albums => {
-            for saved in &app.library.albums.items {
-                let album = &saved.album;
-                if !needle.is_empty()
-                    && !album.name.to_lowercase().contains(&needle)
-                    && !album
-                        .artists
-                        .iter()
-                        .any(|a| a.name.to_lowercase().contains(&needle))
-                {
-                    continue;
-                }
-                let artists = crate::api::models::join_names(
-                    album.artists.iter().map(|artist| artist.name.as_str()),
-                );
-                entries.push(Entry {
-                    image: pick_image(&album.images, 64).map(str::to_string),
-                    grid_image: pick_image(&album.images, super::GRID_ART_TARGET_WIDTH)
-                        .map(str::to_string),
-                    name: album.name.clone(),
-                    subtitle: format!("{} • {artists}", app.album_kind_label(album)),
-                    grid_subtitle: artists,
-                    page: Page::Album(album.id.clone()),
-                    uri: album.uri.clone(),
-                    round: false,
-                    liked: false,
-                    owned: false,
-                    editable: false,
-                    playlist_index: None,
-                    folder: None,
-                    depth: 0,
-                    added_at: saved_time(saved.added_at.as_deref()),
-                });
-            }
-            loading = app.library.albums.loading && app.library.albums.items.is_empty();
-            error = app.library.albums.error.clone();
-            if app.library.albums.error.is_none() && app.library.albums.can_load_more() {
-                more_page = Some(Page::Albums);
-            }
-        }
-        Filter::Artists => {
-            for artist in &app.library.artists.items {
-                if !needle.is_empty() && !artist.name.to_lowercase().contains(&needle) {
-                    continue;
-                }
-                entries.push(Entry {
-                    image: pick_image(&artist.images, 64).map(str::to_string),
-                    grid_image: pick_image(&artist.images, super::GRID_ART_TARGET_WIDTH)
-                        .map(str::to_string),
-                    name: artist.name.clone(),
-                    subtitle: gettext(locale, "Artist").into_owned(),
-                    grid_subtitle: String::new(),
-                    page: Page::Artist(artist.id.clone()),
-                    uri: artist.uri.clone(),
-                    round: true,
-                    liked: false,
-                    owned: false,
-                    editable: false,
-                    playlist_index: None,
-                    folder: None,
-                    depth: 0,
-                    added_at: None,
-                });
-            }
-            loading = app.library.artists.loading && app.library.artists.items.is_empty();
-            error = app.library.artists.error.clone();
-            if app.library.artists.error.is_none() && app.library.artists.can_load_more() {
-                more_page = Some(Page::Artists);
-            }
-        }
-        Filter::Podcasts => {
-            for saved in &app.library.shows.items {
-                let show = &saved.show;
-                // Audiobooks arrive as shows, but librespot can't play them.
-                if app.audiobook_shows.contains(&show.uri) {
-                    continue;
-                }
-                if !needle.is_empty() && !show.name.to_lowercase().contains(&needle) {
-                    continue;
-                }
-                entries.push(Entry {
-                    image: pick_image(&show.images, 64).map(str::to_string),
-                    grid_image: pick_image(&show.images, super::GRID_ART_TARGET_WIDTH)
-                        .map(str::to_string),
-                    name: show.name.clone(),
-                    // Translators: {publisher} is the podcast's publisher.
-                    subtitle: gettext(locale, "Podcast • {publisher}")
-                        .replace("{publisher}", &show.publisher),
-                    grid_subtitle: show.publisher.clone(),
-                    page: Page::Show(show.id.clone()),
-                    uri: show.uri.clone(),
-                    round: false,
-                    liked: false,
-                    owned: false,
-                    editable: false,
-                    playlist_index: None,
-                    folder: None,
-                    depth: 0,
-                    added_at: saved_time(saved.added_at.as_deref()),
-                });
-            }
-            loading = app.library.shows.loading && app.library.shows.items.is_empty();
-            error = app.library.shows.error.clone();
-            if app.library.shows.error.is_none() && app.library.shows.can_load_more() {
-                more_page = Some(Page::Podcasts);
-            }
-        }
-    }
-
-    order_entries(app, filter, sort, &mut entries);
+    let prepared = prepared_entries(app, filter, sort, &needle);
+    let entries = &prepared.entries;
+    let loading = prepared.loading;
+    let error = &prepared.error;
+    let more_page = prepared.more_page.clone();
     let custom_order = filter == Filter::Playlists && sort == LibrarySort::Local;
     let pins = app.settings.library_pins();
     let pinned_rows = entries
@@ -1215,7 +1413,7 @@ fn contents(app: &mut App, ui: &mut egui::Ui, grid_art: Option<Rect>) {
                 library_grid(
                     app,
                     ui,
-                    &entries,
+                    entries,
                     filter,
                     custom_order,
                     pinned_rows,
@@ -1531,9 +1729,9 @@ fn contents(app: &mut App, ui: &mut egui::Ui, grid_art: Option<Rect>) {
                     && let Some(drag) = egui::DragAndDrop::take_payload::<DragEntry>(ui.ctx())
                 {
                     if filter == Filter::Playlists {
-                        drop_playlist_row(app, &entries, pinned_rows, slot, &drag.uri);
+                        drop_playlist_row(app, entries, pinned_rows, slot, &drag.uri);
                     } else {
-                        drop_row(app, &entries, pinned_rows, slot, &drag.uri);
+                        drop_row(app, entries, pinned_rows, slot, &drag.uri);
                     }
                 }
             }
@@ -2073,6 +2271,108 @@ pub fn liked_cover(ui: &egui::Ui, rect: Rect, radius: f32) {
     Icon::HeartFilled
         .image(egui::Color32::WHITE, size)
         .paint_at(ui, icon_rect);
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+
+    fn app() -> App {
+        let root = std::env::temp_dir().join(format!(
+            "spotifast-sidebar-cache-{:032x}",
+            rand::random::<u128>()
+        ));
+        let mut app = App::new(
+            &crate::backend::Waker::default(),
+            crate::paths::AppDirs {
+                config: root.join("config"),
+                state: root.join("state"),
+                cache: root.join("cache"),
+            },
+            crate::settings::Settings::default(),
+            crate::app::AppOptions {
+                media_controls: false,
+                restore_sign_in: false,
+                tray: false,
+            },
+        );
+        crate::demo::populate(&mut app);
+        app
+    }
+
+    #[test]
+    fn unchanged_repaints_reuse_rows_but_renames_rebuild_them() {
+        let mut app = app();
+        let first = prepared_entries(&mut app, Filter::Playlists, LibrarySort::Name, "");
+        app.local.position_ms += 1000;
+        let same = prepared_entries(&mut app, Filter::Playlists, LibrarySort::Name, "");
+        assert!(Arc::ptr_eq(&first, &same));
+        let playlists = match &mut app.library.playlists {
+            Loadable::Loaded(items) => items,
+            _ => unreachable!(),
+        };
+        let uri = playlists[0].uri.clone();
+        playlists[0].name = "Renamed immediately".into();
+        let renamed = prepared_entries(&mut app, Filter::Playlists, LibrarySort::Name, "");
+        assert!(!Arc::ptr_eq(&first, &renamed));
+        assert!(
+            renamed
+                .entries
+                .iter()
+                .any(|entry| entry.uri == uri && entry.name == "Renamed immediately")
+        );
+    }
+
+    #[test]
+    fn prepared_rows_follow_pins_folders_filter_locale_and_shelf_updates() {
+        let mut app = app();
+        let first = entries_fingerprint(&app, Filter::Playlists, LibrarySort::Spotify, "");
+        app.settings
+            .pinned_contexts
+            .push("spotify:playlist:pl1".into());
+        let pinned = entries_fingerprint(&app, Filter::Playlists, LibrarySort::Spotify, "");
+        assert_ne!(first, pinned);
+        app.collapsed_folders.push("folder".into());
+        let collapsed = entries_fingerprint(&app, Filter::Playlists, LibrarySort::Spotify, "");
+        assert_ne!(pinned, collapsed);
+        app.rootlist
+            .push(crate::player::RootlistEntry::FolderStart {
+                id: "new".into(),
+                name: "New folder".into(),
+            });
+        let folders = entries_fingerprint(&app, Filter::Playlists, LibrarySort::Spotify, "");
+        assert_ne!(collapsed, folders);
+        assert_ne!(
+            folders,
+            entries_fingerprint(&app, Filter::Playlists, LibrarySort::Spotify, "search")
+        );
+        app.locale = Locale::German;
+        assert_ne!(
+            folders,
+            entries_fingerprint(&app, Filter::Playlists, LibrarySort::Spotify, "")
+        );
+        let albums = entries_fingerprint(&app, Filter::Albums, LibrarySort::Name, "");
+        app.library.albums.items[0].album.name.push_str(" changed");
+        assert_ne!(
+            albums,
+            entries_fingerprint(&app, Filter::Albums, LibrarySort::Name, "")
+        );
+        let artists = entries_fingerprint(&app, Filter::Artists, LibrarySort::Name, "");
+        app.library.artists.items[0].name.push_str(" changed");
+        assert_ne!(
+            artists,
+            entries_fingerprint(&app, Filter::Artists, LibrarySort::Name, "")
+        );
+        let shows = entries_fingerprint(&app, Filter::Podcasts, LibrarySort::Name, "");
+        app.library.shows.items[0]
+            .show
+            .publisher
+            .push_str(" changed");
+        assert_ne!(
+            shows,
+            entries_fingerprint(&app, Filter::Podcasts, LibrarySort::Name, "")
+        );
+    }
 }
 
 #[cfg(all(test, feature = "demo"))]

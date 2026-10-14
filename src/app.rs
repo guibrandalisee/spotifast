@@ -403,6 +403,7 @@ pub struct App {
     confirmed_ep_albums: HashSet<String>,
     /// Built table rows, keyed by page. Capped; dropped on reset and eviction.
     pub table_rows: HashMap<Page, TableRowsCache>,
+    pub(crate) sidebar_entries: Option<crate::ui::sidebar::EntriesCache>,
     page_used: HashMap<Page, Instant>,
     track_used: HashMap<String, Instant>,
 
@@ -896,6 +897,7 @@ impl App {
             audiobooks_requested: HashSet::new(),
             confirmed_ep_albums: HashSet::new(),
             table_rows: HashMap::new(),
+            sidebar_entries: None,
             page_used: HashMap::new(),
             track_used: HashMap::new(),
             history,
@@ -2496,6 +2498,7 @@ impl App {
         self.search.playlists_pending = false;
         self.search.error = None;
         self.table_rows.clear();
+        self.sidebar_entries = None;
         self.page_used.clear();
         self.track_used.clear();
         self.copied_songs.clear();

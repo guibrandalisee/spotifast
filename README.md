@@ -48,6 +48,9 @@ without credentials. Audio quality and cache limits remain unchanged.
 When Spotify remembers a song without an active device, Play uses this computer's
 ready player. A remembered song alone does not open the device picker.
 
+Library sidebar rows are reused between repaints. Renames, permissions, folders,
+pins, search, ordering and language changes rebuild the prepared rows immediately.
+
 ### Personal fork: offline playlists
 
 Use the circular **Download** button beside Shuffle in a playlist while local
