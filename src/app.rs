@@ -7467,13 +7467,16 @@ impl App {
         }
         // Remember the source at the command, even if no catalogue poll arrives.
         // An explicit standalone play clears the old collection.
-        self.resume_context = request.context_uri.clone();
+        self.resume_context = request
+            .context_uri
+            .clone()
+            .or_else(|| source.map(str::to_owned));
         self.resume_context_track = request.offset_uri.clone();
         self.session_dirty = true;
-        // Show a context as playing at once, or clear the previous context
-        // for a plain track list. Spotify's state catches up behind it.
+        // Keep an explicit view's source even when its playback is a plain
+        // track list. A standalone request clears the previous collection.
         self.assumed_context = Some(AssumedContext {
-            uri: request.context_uri.clone().unwrap_or_default(),
+            uri: self.resume_context.clone().unwrap_or_default(),
             shuffle: Some(shuffle),
             at: Instant::now(),
         });
@@ -7927,6 +7930,12 @@ impl App {
                 .now_playing()
                 .filter(|now| self.is_downloaded(&now.uri))
         {
+            // The cached bar has no live context yet. Resume the saved request
+            // instead of turning its downloaded track into a standalone load.
+            if now.resuming {
+                self.resume_last();
+                return;
+            }
             let mut request = self
                 .playing_context_uri()
                 .filter(|uri| uri.starts_with("spotify:playlist:"))
@@ -13809,6 +13818,97 @@ mod tests {
         );
         assert_eq!(app.resume_context, None);
         assert_eq!(app.playing_context_uri(), None);
+        app.backend.shutdown();
+    }
+
+    #[test]
+    fn a_view_play_records_its_explicit_source_before_playback_reports_back() {
+        let mut app = headless_app();
+        let context = "spotify:playlist:clicked";
+        app.play_request_from_context(
+            PlayRequest::tracks(vec![
+                "spotify:track:first".into(),
+                "spotify:track:second".into(),
+            ])
+            .starting_at_index(1),
+            false,
+            Some(context),
+        );
+        assert_eq!(app.resume_context.as_deref(), Some(context));
+        assert_eq!(app.playing_context_uri().as_deref(), Some(context));
+        assert!(app.now_playing_live().is_none());
+        app.save_session();
+        app.persistence.flush();
+        assert_eq!(
+            SessionState::load(&app.dirs.session_file())
+                .last_context
+                .as_deref(),
+            Some(context)
+        );
+        app.play_request(
+            PlayRequest::tracks(vec!["spotify:track:standalone".into()]),
+            false,
+        );
+        assert_eq!(app.resume_context, None);
+        assert_eq!(app.playing_context_uri(), None);
+        app.backend.shutdown();
+    }
+
+    #[test]
+    fn downloaded_cold_resume_keeps_the_saved_playlist_and_original_track() {
+        let mut app = headless_app();
+        app.resume_context = Some("spotify:playlist:original".into());
+        app.resume_track = Some("spotify:track:decoded".into());
+        app.resume_context_track = Some("spotify:track:original".into());
+        app.resume_position_ms = 19_566;
+        app.track_cache.insert(
+            "decoded".into(),
+            Track {
+                id: Some("decoded".into()),
+                uri: "spotify:track:decoded".into(),
+                duration_ms: 240_000,
+                ..Default::default()
+            },
+        );
+        // A download containing the decoded track is not the playback origin.
+        app.downloaded_tracks.insert(
+            "another".into(),
+            ["spotify:track:decoded".into()].into_iter().collect(),
+        );
+        app.downloaded_tracks.insert(
+            "original".into(),
+            ["spotify:track:original".into(), "spotify:track:next".into()]
+                .into_iter()
+                .collect(),
+        );
+        assert!(app.now_playing().unwrap().resuming);
+        assert_eq!(app.playing_context_uri(), None);
+        app.toggle_play();
+        assert_eq!(
+            app.resume_context.as_deref(),
+            Some("spotify:playlist:original")
+        );
+        assert_eq!(
+            app.resume_context_track.as_deref(),
+            Some("spotify:track:original")
+        );
+        assert!(
+            app.pending_play_keys
+                .contains(&"spotify:playlist:original".into())
+        );
+        assert_eq!(app.intent_track.as_ref().unwrap().position_ms, 19_566);
+        app.save_session();
+        app.persistence.flush();
+        let saved = SessionState::load(&app.dirs.session_file());
+        assert_eq!(
+            saved.last_context.as_deref(),
+            Some("spotify:playlist:original")
+        );
+        assert_eq!(
+            saved.last_context_track.as_deref(),
+            Some("spotify:track:original")
+        );
+        assert_eq!(saved.last_position_ms, 19_566);
         app.backend.shutdown();
     }
 

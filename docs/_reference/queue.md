@@ -129,6 +129,10 @@ not consume a queue row or restore an older queue saved on this computer.
    promptly without waiting for the song to finish.
 
 The cached last-song preview preserves its saved playlist until playback resumes.
+Resuming downloaded audio from that preview uses the saved playlist and its
+original track position instead of replacing it with a single-song request.
+An explicit source supplied by a filtered or sorted view is recorded when Play
+is requested, before the player or Spotify reports back.
 Pausing local playback and missing catalogue polls do not erase its known context.
 An explicit standalone play still clears the previous playlist context.
 
