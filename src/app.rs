@@ -2587,6 +2587,16 @@ impl App {
     }
 
     fn handle_local(&mut self, state: LocalState) {
+        if state.playback != self.local.playback
+            || state.track_sequence != self.local.track_sequence
+        {
+            log::info!(
+                "local playback state received by UI: {:?}, sequence={}, offline={}",
+                state.playback,
+                state.track_sequence,
+                self.offline_playing
+            );
+        }
         if state.track != self.local.track {
             self.invalidate_sidebar();
         }
@@ -7905,6 +7915,11 @@ impl App {
 
     fn toggle_play(&mut self) {
         let playing = self.now_playing().map(|now| now.playing);
+        log::info!(
+            "Play/Pause clicked: shown_playing={playing:?}, offline={}, local_active={}",
+            self.offline_playing,
+            self.local.is_active()
+        );
         if !self.offline_playing
             && playing != Some(true)
             && !matches!(self.target(), Target::Remote(Some(_)))

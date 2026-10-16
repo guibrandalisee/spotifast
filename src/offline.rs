@@ -1137,6 +1137,7 @@ impl OfflinePlayer {
                     thread_stop,
                     thread_queue,
                 ) {
+                    log::error!("offline playback worker failed: {error:#}");
                     notify(EngineEvent::State(LocalState {
                         error: Some(format!("Offline playback: {error}")),
                         ..Default::default()
@@ -1177,6 +1178,19 @@ impl OfflinePlayer {
             .unwrap_or_default()
     }
     pub fn command(&self, command: PlayerCommand) -> Result<()> {
+        match &command {
+            PlayerCommand::Load(spec) => log::info!(
+                "offline load queued: context={}, tracks={}, play={}, position_ms={}",
+                spec.context_uri.is_some(),
+                spec.uris.len(),
+                spec.play,
+                spec.position_ms
+            ),
+            PlayerCommand::SetPlaying(playing) => {
+                log::info!("offline transport queued: play={playing}")
+            }
+            _ => {}
+        }
         self.sender
             .send(Control::Player(command))
             .map_err(|_| anyhow::anyhow!("Offline player stopped"))
@@ -1252,6 +1266,7 @@ fn run(
     let mut announced = Instant::now() - Duration::from_secs(1);
     let mut queue_dirty = true;
     let mut prefetched = None;
+    let mut first_packet = None;
     while !stop.load(Ordering::SeqCst) {
         let playing = state.lock().unwrap_or_else(|e| e.into_inner()).playback == Playback::Playing;
         let command = receive_control(&receiver, playing);
@@ -1279,6 +1294,8 @@ fn run(
             s.error = None;
             match command {
                 PlayerCommand::Load(spec) => {
+                    log::info!("offline load received by audio worker");
+                    first_packet = Some(Instant::now());
                     queue_dirty = true;
                     let list: Vec<usize> = if let Some(uri) = spec
                         .context_uri
@@ -1363,6 +1380,7 @@ fn run(
                     }
                 }
                 PlayerCommand::SetPlaying(playing) => {
+                    log::info!("offline transport received by audio worker: play={playing}");
                     s.playback = if playing {
                         Playback::Playing
                     } else {
@@ -1432,6 +1450,12 @@ fn run(
                 config.normalisation,
                 &stop,
             )?;
+            if let Some(started) = first_packet {
+                log::info!(
+                    "offline decoder ready after {} ms",
+                    started.elapsed().as_millis()
+                );
+            }
             let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
             if s.position_ms != 0 {
                 s.position_ms = next.seek(s.position_ms)?;
@@ -1462,6 +1486,12 @@ fn run(
             drop(s);
             if playing {
                 sink.start()?;
+            }
+            if let Some(started) = first_packet {
+                log::info!(
+                    "offline audio output ready after {} ms; play={playing}",
+                    started.elapsed().as_millis()
+                );
             }
             announced = Instant::now() - Duration::from_secs(1);
         }
@@ -1508,6 +1538,12 @@ fn run(
                         }
                     }
                     sink.write(packet, &mut converter)?;
+                    if let Some(started) = first_packet.take() {
+                        log::info!(
+                            "offline first packet delivered after {} ms",
+                            started.elapsed().as_millis()
+                        );
+                    }
                     let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
                     s.position_ms = position.position_ms;
                     s.position_at = Some(Instant::now());

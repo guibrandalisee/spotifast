@@ -335,6 +335,9 @@ registering a Connect device. It uses the normal output, EQ, visualizers and
 volume path. Connect playback is stopped when offline playback starts. Offline
 queue reads are answered locally, and delayed Spotify playback responses cannot
 replace the displayed local state. Offline listens are not sent to Spotify.
+The local app log records Play/Pause requests, transport state changes and
+offline startup timings through delivery of the first audio packet. These
+diagnostics contain no protected keys or decoded audio.
 
 The offline player rebuilds its queue snapshot only when its order or current
 song changes; position reports do not copy the remaining playlist. While paused
