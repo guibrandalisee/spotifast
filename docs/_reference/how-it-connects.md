@@ -22,6 +22,8 @@ The native transport handles account details, library collections, searches,
 albums, artists, tracks, shows, episodes, playlist changes, image uploads, and
 Connect device/state/queue reads and controls. Catalogue queries use persisted
 Pathfinder operations; playlist edits use playlist/v2; Connect uses connect-state.
+When no Connect devices are online, Spotify can omit the device map. This is
+shown as an empty device list, including while downloaded audio plays locally.
 Tokens and authorization responses are never logged or saved in plain files.
 Queries fail explicitly if Spotify changes an operation rather than switching
 to another application or quota.

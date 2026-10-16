@@ -54,6 +54,8 @@ the existing streaming buffers. The local log records playback startup timing
 without credentials. Audio quality and cache limits remain unchanged.
 When Spotify remembers a song without an active device, Play uses this computer's
 ready player. A remembered song alone does not open the device picker.
+When no Spotify Connect devices are online, the device menu shows an empty
+list instead of a response error, including during offline playback.
 
 Library sidebar rows are reused between repaints. Renames, permissions, folders,
 pins, search, ordering and language changes rebuild the prepared rows immediately.

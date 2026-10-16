@@ -59,6 +59,14 @@ fn text(value: &Value) -> &str {
     value.as_str().unwrap_or_default()
 }
 
+fn cluster_devices(cluster: &Value) -> Result<Option<&serde_json::Map<String, Value>>> {
+    let cluster = cluster.as_object().ok_or_else(protocol_error)?;
+    cluster
+        .get("devices")
+        .map(|devices| devices.as_object().ok_or_else(protocol_error))
+        .transpose()
+}
+
 fn active_cluster_device(cluster: &Value) -> Option<(&str, &Value)> {
     let id = cluster["active_device_id"]
         .as_str()
@@ -701,7 +709,9 @@ impl Client {
             .await?;
         let state = &cluster["player_state"];
         let active = text(&cluster["active_device_id"]);
-        let devices = cluster["devices"].as_object().ok_or_else(protocol_error)?;
+        // Protobuf JSON omits an empty map when no Connect devices are online.
+        let empty_devices = serde_json::Map::new();
+        let devices = cluster_devices(&cluster)?.unwrap_or(&empty_devices);
         let device = |id: &str, v: &Value| json!({"id":id,"name":v["name"],"type":text(&v["device_type"]),"is_active":id==active,"is_restricted":!at(v,"/capabilities/is_controllable").as_bool().unwrap_or(true),"supports_volume":!at(v,"/capabilities/disable_volume").as_bool().unwrap_or(false),"volume_percent":number(&v["volume"])*100/65535});
         if *method == Method::GET {
             if path.ends_with("/devices") {
@@ -1088,6 +1098,47 @@ mod tests {
             ["spotify:track:a", "spotify:episode:b"]
         );
     }
+    #[test]
+    fn connect_without_online_devices_accepts_the_omitted_map() {
+        // Shape observed after the local Connect engine stops for offline audio.
+        let cluster = json!({
+            "need_full_player_state": false,
+            "needs_local_devices": false,
+            "needs_state_updates": false,
+            "player_state": {},
+            "server_timestamp_ms": 0,
+            "timestamp": 0
+        });
+        assert!(cluster_devices(&cluster).unwrap().is_none());
+        assert!(active_cluster_device(&cluster).is_none());
+        assert!(
+            cluster_devices(&json!({"devices": {}}))
+                .unwrap()
+                .unwrap()
+                .is_empty()
+        );
+        let online = json!({"devices": {"remote": {"can_play": true}}});
+        assert!(
+            cluster_devices(&online)
+                .unwrap()
+                .unwrap()
+                .contains_key("remote")
+        );
+    }
+
+    #[test]
+    fn malformed_connect_device_maps_still_report_a_protocol_error() {
+        for cluster in [
+            Value::Null,
+            json!([]),
+            json!({"devices": []}),
+            json!({"devices": null}),
+            json!({"devices": "invalid"}),
+        ] {
+            assert!(cluster_devices(&cluster).is_err(), "{cluster}");
+        }
+    }
+
     #[test]
     fn remembered_song_without_a_registered_active_device_is_not_playback() {
         for active in [Value::Null, json!(""), json!("gone")] {
