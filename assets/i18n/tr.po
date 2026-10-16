@@ -674,7 +674,7 @@ msgstr "Yerel çalma: {error}"
 msgid "Spotify audio disconnected. Reconnecting local playback"
 msgstr "Spotify ses bağlantısı kesildi. Yerel çalma yeniden bağlanıyor"
 
-#: src/app.rs:2384 src/app/radio.rs:169 src/ui/radio.rs:35 src/ui/radio.rs:77
+#: src/app.rs:2384 src/app/radio.rs:169 src/ui/radio.rs:34 src/ui/radio.rs:76
 msgid "Radio"
 msgstr "Radyo"
 
@@ -2627,47 +2627,42 @@ msgstr "Önceki Boyut"
 msgid "Maximize"
 msgstr "Ekranı Kapla"
 
-#: src/ui/radio.rs:105
-msgid "Radio comes from playback on this computer. Turn it on in Settings."
-msgstr ""
-"Radyo bu bilgisayarda çalma özelliğinden gelir. Ayarlar'dan etkinleştirin."
-
-#: src/ui/radio.rs:202
+#: src/ui/radio.rs:186
 msgid "Based on this playlist"
 msgstr "Bu çalma listesine dayalı"
 
-#: src/ui/radio.rs:203
+#: src/ui/radio.rs:187
 msgid "Based on this album"
 msgstr "Bu albüme dayalı"
 
-#: src/ui/radio.rs:204
+#: src/ui/radio.rs:188
 msgid "Based on this artist"
 msgstr "Bu sanatçıya dayalı"
 
-#: src/ui/radio.rs:205
+#: src/ui/radio.rs:189
 msgid "Based on this song"
 msgstr "Bu şarkıya dayalı"
 
 #. Translators: {first} is an artist name.
-#: src/ui/radio.rs:224
+#: src/ui/radio.rs:208
 #, rust-format
 msgid "With {first}"
 msgstr "{first} ile"
 
 #. Translators: {first} and {second} are artist names.
-#: src/ui/radio.rs:227
+#: src/ui/radio.rs:211
 #, rust-format
 msgid "With {first} and {second}"
 msgstr "{first} ve {second} ile"
 
 #. Translators: {first}, {second} and {third} are artist names.
-#: src/ui/radio.rs:233
+#: src/ui/radio.rs:217
 #, rust-format
 msgid "With {first}, {second} and {third}"
 msgstr "{first}, {second} ve {third} ile"
 
 #. Translators: {first}, {second} and {third} are artist names; more follow.
-#: src/ui/radio.rs:240
+#: src/ui/radio.rs:224
 #, rust-format
 msgid "With {first}, {second}, {third} and more"
 msgstr "{first}, {second}, {third} ve daha fazlası ile"
@@ -3205,3 +3200,7 @@ msgstr "Çevrimdışı oynatma hazırlanıyor…"
 #: src/ui/collection.rs src/theme.rs
 msgid "Available offline"
 msgstr "Çevrimdışı kullanılabilir"
+
+#~ msgid "Radio comes from playback on this computer. Turn it on in Settings."
+#~ msgstr ""
+#~ "Radyo bu bilgisayarda çalma özelliğinden gelir. Ayarlar'dan etkinleştirin."

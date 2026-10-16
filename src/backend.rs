@@ -1910,6 +1910,7 @@ impl Worker {
                             }
                         });
                         self.signed_in = true;
+                        self.start_radio();
                         self.offline_account = Some(user.id.clone());
                         self.emit(Event::Auth(AuthStatus::Connected {
                             username: user.name().to_owned(),
@@ -3571,23 +3572,36 @@ impl Worker {
         });
     }
 
-    /// Resolves the waiting radios once the streaming session is ready; the
-    /// Web API has no stations.
+    /// Native catalogue reads remain available while downloaded music plays.
+    /// Retain the session path for clients without a native transport.
     fn start_radio(&mut self) {
-        let Some(engine) = self.engine.clone() else {
+        let native = self.api.native();
+        let engine = self.engine.clone();
+        if native.is_none() && engine.is_none() {
             return;
-        };
+        }
         let session_generation = *self.session.borrow();
         for (seed, generation) in std::mem::take(&mut self.radio_waiting) {
-            let engine = Arc::clone(&engine);
+            let native = native.clone();
+            let engine = engine.clone();
             let commands = self.commands.clone();
             tokio::spawn(async move {
                 let result = match crate::util::station_uri(&seed) {
                     Some(station) => {
-                        match tokio::time::timeout(
-                            RADIO_TIMEOUT,
-                            session_reads::station(engine.session(), &station),
-                        )
+                        match tokio::time::timeout(RADIO_TIMEOUT, async {
+                            match native {
+                                Some(client) => {
+                                    client.radio(&seed).await.map_err(anyhow::Error::from)
+                                }
+                                None => {
+                                    session_reads::station(
+                                        engine.as_ref().expect("radio transport").session(),
+                                        &station,
+                                    )
+                                    .await
+                                }
+                            }
+                        })
                         .await
                         {
                             Ok(Ok(tracks)) => Ok(tracks),
@@ -5525,6 +5539,40 @@ fn playback_credentials(account: Option<AccountId>, access_token: String) -> Opt
 #[cfg(test)]
 mod authorization_tests {
     use super::*;
+
+    #[test]
+    fn radio_resolves_without_an_audio_engine_during_offline_playback() {
+        let (runtime, mut worker, _events) = worker("radio-without-engine");
+        let native = crate::internal::Client::new(
+            Http::unavailable("test network unavailable".into()),
+            Credentials::with_access_token("test"),
+        );
+        worker.api.install_native(native, AccountId::new("alice"));
+        worker.signed_in = true;
+        worker
+            .offline_active
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(worker.engine.is_none());
+        let seed = "spotify:track:4uLU6hMCjMI75M1A2tKUQC";
+        worker.radio_waiting.insert(seed.into(), 42);
+        let (commands, mut receiver) = mpsc::unbounded_channel();
+        worker.commands = commands;
+        runtime.block_on(async {
+            worker.start_radio();
+            assert!(worker.radio_waiting.is_empty(), "do not wait for a stopped engine");
+            let command = tokio::time::timeout(Duration::from_secs(1), receiver.recv()).await.unwrap().unwrap();
+            assert!(matches!(command, Command::RadioResolved { seed: resolved, generation: 42, result: Err(_), .. } if resolved == seed));
+        });
+        assert!(
+            worker
+                .offline_active
+                .load(std::sync::atomic::Ordering::SeqCst)
+        );
+        assert!(
+            worker.engine.is_none(),
+            "catalogue reads must not start audio"
+        );
+    }
 
     #[test]
     fn native_reauthorization_failure_preserves_the_existing_account() {

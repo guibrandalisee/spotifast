@@ -663,7 +663,7 @@ msgstr "本地播放：{error}"
 msgid "Spotify audio disconnected. Reconnecting local playback"
 msgstr "Spotify 音频已断开，正在重新连接本地播放"
 
-#: src/app.rs:2384 src/app/radio.rs:169 src/ui/radio.rs:35 src/ui/radio.rs:77
+#: src/app.rs:2384 src/app/radio.rs:169 src/ui/radio.rs:34 src/ui/radio.rs:76
 msgid "Radio"
 msgstr "电台"
 
@@ -2530,46 +2530,42 @@ msgstr "还原"
 msgid "Maximize"
 msgstr "最大化"
 
-#: src/ui/radio.rs:105
-msgid "Radio comes from playback on this computer. Turn it on in Settings."
-msgstr "电台来自这台电脑上的播放。请在设置中开启。"
-
-#: src/ui/radio.rs:202
+#: src/ui/radio.rs:186
 msgid "Based on this playlist"
 msgstr "基于此歌单"
 
-#: src/ui/radio.rs:203
+#: src/ui/radio.rs:187
 msgid "Based on this album"
 msgstr "基于此专辑"
 
-#: src/ui/radio.rs:204
+#: src/ui/radio.rs:188
 msgid "Based on this artist"
 msgstr "基于此艺人"
 
-#: src/ui/radio.rs:205
+#: src/ui/radio.rs:189
 msgid "Based on this song"
 msgstr "基于此歌曲"
 
 #. Translators: {first} is an artist name.
-#: src/ui/radio.rs:224
+#: src/ui/radio.rs:208
 #, rust-format
 msgid "With {first}"
 msgstr "包含 {first}"
 
 #. Translators: {first} and {second} are artist names.
-#: src/ui/radio.rs:227
+#: src/ui/radio.rs:211
 #, rust-format
 msgid "With {first} and {second}"
 msgstr "包含 {first} 和 {second}"
 
 #. Translators: {first}, {second} and {third} are artist names.
-#: src/ui/radio.rs:233
+#: src/ui/radio.rs:217
 #, rust-format
 msgid "With {first}, {second} and {third}"
 msgstr "包含 {first}、{second} 和 {third}"
 
 #. Translators: {first}, {second} and {third} are artist names; more follow.
-#: src/ui/radio.rs:240
+#: src/ui/radio.rs:224
 #, rust-format
 msgid "With {first}, {second}, {third} and more"
 msgstr "包含 {first}、{second}、{third} 等"
@@ -3112,3 +3108,6 @@ msgstr "正在准备离线播放…"
 #: src/ui/collection.rs src/theme.rs
 msgid "Available offline"
 msgstr "可离线播放"
+
+#~ msgid "Radio comes from playback on this computer. Turn it on in Settings."
+#~ msgstr "电台来自这台电脑上的播放。请在设置中开启。"

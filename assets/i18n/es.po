@@ -674,7 +674,7 @@ msgstr "Reproducción local: {error}"
 msgid "Spotify audio disconnected. Reconnecting local playback"
 msgstr "Se desconectó el audio de Spotify. Reconectando la reproducción local"
 
-#: src/app.rs:2384 src/app/radio.rs:169 src/ui/radio.rs:35 src/ui/radio.rs:77
+#: src/app.rs:2384 src/app/radio.rs:169 src/ui/radio.rs:34 src/ui/radio.rs:76
 msgid "Radio"
 msgstr "Radio"
 
@@ -2626,47 +2626,42 @@ msgstr "Restaurar"
 msgid "Maximize"
 msgstr "Maximizar"
 
-#: src/ui/radio.rs:105
-msgid "Radio comes from playback on this computer. Turn it on in Settings."
-msgstr ""
-"La radio viene de la reproducción en esta computadora. Actívala en Ajustes."
-
-#: src/ui/radio.rs:202
+#: src/ui/radio.rs:186
 msgid "Based on this playlist"
 msgstr "Basada en esta playlist"
 
-#: src/ui/radio.rs:203
+#: src/ui/radio.rs:187
 msgid "Based on this album"
 msgstr "Basada en este álbum"
 
-#: src/ui/radio.rs:204
+#: src/ui/radio.rs:188
 msgid "Based on this artist"
 msgstr "Basada en este artista"
 
-#: src/ui/radio.rs:205
+#: src/ui/radio.rs:189
 msgid "Based on this song"
 msgstr "Basada en esta canción"
 
 #. Translators: {first} is an artist name.
-#: src/ui/radio.rs:224
+#: src/ui/radio.rs:208
 #, rust-format
 msgid "With {first}"
 msgstr "Con {first}"
 
 #. Translators: {first} and {second} are artist names.
-#: src/ui/radio.rs:227
+#: src/ui/radio.rs:211
 #, rust-format
 msgid "With {first} and {second}"
 msgstr "Con {first} y {second}"
 
 #. Translators: {first}, {second} and {third} are artist names.
-#: src/ui/radio.rs:233
+#: src/ui/radio.rs:217
 #, rust-format
 msgid "With {first}, {second} and {third}"
 msgstr "Con {first}, {second} y {third}"
 
 #. Translators: {first}, {second} and {third} are artist names; more follow.
-#: src/ui/radio.rs:240
+#: src/ui/radio.rs:224
 #, rust-format
 msgid "With {first}, {second}, {third} and more"
 msgstr "Con {first}, {second}, {third} y más"
@@ -3219,3 +3214,7 @@ msgstr "Preparando reproducción sin conexión…"
 #: src/ui/collection.rs src/theme.rs
 msgid "Available offline"
 msgstr "Disponible sin conexión"
+
+#~ msgid "Radio comes from playback on this computer. Turn it on in Settings."
+#~ msgstr ""
+#~ "La radio viene de la reproducción en esta computadora. Actívala en Ajustes."

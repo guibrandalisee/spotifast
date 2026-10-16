@@ -5,7 +5,6 @@ use std::sync::Arc;
 
 use crate::api::models::{PlayableItem, Track};
 use crate::app::App;
-use crate::backend::LocalPlayback;
 use crate::i18n::{Locale, gettext};
 use crate::model::{Loadable, Page, RowContext};
 use crate::theme::Icon;
@@ -93,22 +92,7 @@ pub fn radio(app: &mut App, ui: &mut egui::Ui, seed: &str) {
                     None,
                 )
             });
-            if matches!(
-                app.local_playback,
-                LocalPlayback::Unavailable | LocalPlayback::Failed(_)
-            ) {
-                widgets::error_row(
-                    ui,
-                    app,
-                    &gettext(
-                        locale,
-                        "Radio comes from playback on this computer. Turn it on in Settings.",
-                    ),
-                    None,
-                );
-            } else {
-                widgets::loading_row(ui, &app.palette, app.locale);
-            }
+            widgets::loading_row(ui, &app.palette, app.locale);
             return;
         }
         Err(error) => {

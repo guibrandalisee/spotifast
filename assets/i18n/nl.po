@@ -674,7 +674,7 @@ msgstr "Lokaal afspelen: {error}"
 msgid "Spotify audio disconnected. Reconnecting local playback"
 msgstr "Spotify-audio verbroken. Lokaal afspelen maakt opnieuw verbinding"
 
-#: src/app.rs:2384 src/app/radio.rs:169 src/ui/radio.rs:35 src/ui/radio.rs:77
+#: src/app.rs:2384 src/app/radio.rs:169 src/ui/radio.rs:34 src/ui/radio.rs:76
 msgid "Radio"
 msgstr "Radio"
 
@@ -2627,47 +2627,42 @@ msgstr "Herstellen"
 msgid "Maximize"
 msgstr "Maximaliseren"
 
-#: src/ui/radio.rs:105
-msgid "Radio comes from playback on this computer. Turn it on in Settings."
-msgstr ""
-"Radio komt van afspelen op deze computer. Schakel het in via Instellingen."
-
-#: src/ui/radio.rs:202
+#: src/ui/radio.rs:186
 msgid "Based on this playlist"
 msgstr "Gebaseerd op deze playlist"
 
-#: src/ui/radio.rs:203
+#: src/ui/radio.rs:187
 msgid "Based on this album"
 msgstr "Gebaseerd op dit album"
 
-#: src/ui/radio.rs:204
+#: src/ui/radio.rs:188
 msgid "Based on this artist"
 msgstr "Gebaseerd op deze artiest"
 
-#: src/ui/radio.rs:205
+#: src/ui/radio.rs:189
 msgid "Based on this song"
 msgstr "Gebaseerd op dit nummer"
 
 #. Translators: {first} is an artist name.
-#: src/ui/radio.rs:224
+#: src/ui/radio.rs:208
 #, rust-format
 msgid "With {first}"
 msgstr "Met {first}"
 
 #. Translators: {first} and {second} are artist names.
-#: src/ui/radio.rs:227
+#: src/ui/radio.rs:211
 #, rust-format
 msgid "With {first} and {second}"
 msgstr "Met {first} en {second}"
 
 #. Translators: {first}, {second} and {third} are artist names.
-#: src/ui/radio.rs:233
+#: src/ui/radio.rs:217
 #, rust-format
 msgid "With {first}, {second} and {third}"
 msgstr "Met {first}, {second} en {third}"
 
 #. Translators: {first}, {second} and {third} are artist names; more follow.
-#: src/ui/radio.rs:240
+#: src/ui/radio.rs:224
 #, rust-format
 msgid "With {first}, {second}, {third} and more"
 msgstr "Met {first}, {second}, {third} en meer"
@@ -3218,3 +3213,7 @@ msgstr "Offline afspelen voorbereiden…"
 #: src/ui/collection.rs src/theme.rs
 msgid "Available offline"
 msgstr "Offline beschikbaar"
+
+#~ msgid "Radio comes from playback on this computer. Turn it on in Settings."
+#~ msgstr ""
+#~ "Radio komt van afspelen op deze computer. Schakel het in via Instellingen."

@@ -15,6 +15,19 @@ fn main() -> anyhow::Result<()> {
         };
         let client = spotifast::internal::Client::new(spotifast::http::Http::default(), credentials.clone());
         let args: Vec<String> = std::env::args().skip(1).collect();
+        if args.first().is_some_and(|arg| arg == "--radio") {
+            let seed = args.get(1).ok_or_else(|| anyhow::anyhow!("Supply a Spotify seed URI"))?;
+            let started = std::time::Instant::now();
+            let tracks = tokio::time::timeout(std::time::Duration::from_secs(20), client.radio(seed)).await??;
+            anyhow::ensure!(!tracks.is_empty(), "Radio returned no tracks");
+            let unique: std::collections::HashSet<_> = tracks.iter().map(|track| &track.uri).collect();
+            anyhow::ensure!(unique.len() == tracks.len(), "Radio returned duplicate tracks");
+            if seed.starts_with("spotify:track:") {
+                anyhow::ensure!(tracks[0].uri == *seed, "Radio did not keep the seed first");
+            }
+            println!("radio: tracks={} unique={} elapsed_ms={}", tracks.len(), unique.len(), started.elapsed().as_millis());
+            return Ok(());
+        }
         if args.first().is_some_and(|arg| arg == "--connect-routing") {
             use spotifast::api::{ApiSource, client::{ApiClient, NetActivity}};
             let cluster = client.json(reqwest::Method::GET, "/connect-state/v1/cluster", None).await?;

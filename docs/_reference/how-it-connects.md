@@ -181,6 +181,12 @@ current-track pickup.
 
 ## Collection loading and artwork
 
+Radio pages resolve Spotify's station through the verified native account
+transport, independently of the audio engine. Downloaded music keeps playing
+while an online radio loads. Track details use ordered batches of at most three
+catalogue reads under the existing global limit and cache. The complete radio
+read has a twenty-second deadline and reports a retryable error on failure.
+
 Since 0.9.0, opening a playlist, album, artist, or podcast keeps any
 title, summary, and cover Spotifast already knows while the complete page is
 requested. Controls that need unfinished details stay disabled, and a loading

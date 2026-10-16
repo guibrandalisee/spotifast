@@ -18,6 +18,9 @@ application's quota. Native services can still return rate limits.
   adding/removing/reordering tracks, following and unfollowing, and cover uploads.
 - **Catalogue:** search, albums, artists, tracks, shows, episodes, artist top
   tracks (including total stream counts), discography and related artists.
+- **Radio pages:** song, playlist, album, and artist stations use the context
+  resolver through the native account transport. They can load online while
+  downloaded music plays, without requiring an active streaming audio engine.
 - **Connect:** devices, transfer, play/pause, skips, seek, shuffle, repeat,
   volume, queue reads and queue appends.
 
@@ -47,7 +50,7 @@ clients. Spotifast uses its session for:
   by a song, playlist, album, or artist. Each resolution is a fresh mix of 50
   songs, so a radio page plays the songs it shows rather than asking again.
   Song radios include their seed song first, once, even when the resolver omits
-  it. Its details use the same metadata batch as the recommendations.
+  it. Radio pages use the independent native transport described above.
 - **Audiobook detection** for saved shows, which the Web API lists as podcasts.
 
 ## librespot playback

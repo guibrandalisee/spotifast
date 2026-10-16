@@ -680,7 +680,7 @@ msgstr "Локальное воспроизведение: {error}"
 msgid "Spotify audio disconnected. Reconnecting local playback"
 msgstr "Звук Spotify отключился. Переподключаем локальное воспроизведение"
 
-#: src/app.rs:2384 src/app/radio.rs:169 src/ui/radio.rs:35 src/ui/radio.rs:77
+#: src/app.rs:2384 src/app/radio.rs:169 src/ui/radio.rs:34 src/ui/radio.rs:76
 msgid "Radio"
 msgstr "Радио"
 
@@ -2635,48 +2635,42 @@ msgstr "Восстановить"
 msgid "Maximize"
 msgstr "Развернуть"
 
-#: src/ui/radio.rs:105
-msgid "Radio comes from playback on this computer. Turn it on in Settings."
-msgstr ""
-"Радио работает через воспроизведение на этом компьютере. Включи его в "
-"настройках."
-
-#: src/ui/radio.rs:202
+#: src/ui/radio.rs:186
 msgid "Based on this playlist"
 msgstr "На основе этого плейлиста"
 
-#: src/ui/radio.rs:203
+#: src/ui/radio.rs:187
 msgid "Based on this album"
 msgstr "На основе этого альбома"
 
-#: src/ui/radio.rs:204
+#: src/ui/radio.rs:188
 msgid "Based on this artist"
 msgstr "На основе этого исполнителя"
 
-#: src/ui/radio.rs:205
+#: src/ui/radio.rs:189
 msgid "Based on this song"
 msgstr "На основе этого трека"
 
 #. Translators: {first} is an artist name.
-#: src/ui/radio.rs:224
+#: src/ui/radio.rs:208
 #, rust-format
 msgid "With {first}"
 msgstr "С участием {first}"
 
 #. Translators: {first} and {second} are artist names.
-#: src/ui/radio.rs:227
+#: src/ui/radio.rs:211
 #, rust-format
 msgid "With {first} and {second}"
 msgstr "С участием {first} и {second}"
 
 #. Translators: {first}, {second} and {third} are artist names.
-#: src/ui/radio.rs:233
+#: src/ui/radio.rs:217
 #, rust-format
 msgid "With {first}, {second} and {third}"
 msgstr "С участием {first}, {second} и {third}"
 
 #. Translators: {first}, {second} and {third} are artist names; more follow.
-#: src/ui/radio.rs:240
+#: src/ui/radio.rs:224
 #, rust-format
 msgid "With {first}, {second}, {third} and more"
 msgstr "С участием {first}, {second}, {third} и других"
@@ -3233,3 +3227,8 @@ msgstr "Подготовка офлайн-воспроизведения…"
 #: src/ui/collection.rs src/theme.rs
 msgid "Available offline"
 msgstr "Доступно офлайн"
+
+#~ msgid "Radio comes from playback on this computer. Turn it on in Settings."
+#~ msgstr ""
+#~ "Радио работает через воспроизведение на этом компьютере. Включи его в "
+#~ "настройках."

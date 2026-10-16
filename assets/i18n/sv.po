@@ -673,7 +673,7 @@ msgstr "Lokal uppspelning: {error}"
 msgid "Spotify audio disconnected. Reconnecting local playback"
 msgstr "Spotify-ljudet kopplades från. Återansluter lokal uppspelning"
 
-#: src/app.rs:2384 src/app/radio.rs:169 src/ui/radio.rs:35 src/ui/radio.rs:77
+#: src/app.rs:2384 src/app/radio.rs:169 src/ui/radio.rs:34 src/ui/radio.rs:76
 msgid "Radio"
 msgstr "Radio"
 
@@ -2608,48 +2608,42 @@ msgstr "Återställ"
 msgid "Maximize"
 msgstr "Maximera"
 
-#: src/ui/radio.rs:105
-msgid "Radio comes from playback on this computer. Turn it on in Settings."
-msgstr ""
-"Radio kommer från uppspelning på den här datorn. Aktivera den i "
-"Inställningar."
-
-#: src/ui/radio.rs:202
+#: src/ui/radio.rs:186
 msgid "Based on this playlist"
 msgstr "Baserad på den här spellistan"
 
-#: src/ui/radio.rs:203
+#: src/ui/radio.rs:187
 msgid "Based on this album"
 msgstr "Baserad på det här albumet"
 
-#: src/ui/radio.rs:204
+#: src/ui/radio.rs:188
 msgid "Based on this artist"
 msgstr "Baserad på den här artisten"
 
-#: src/ui/radio.rs:205
+#: src/ui/radio.rs:189
 msgid "Based on this song"
 msgstr "Baserad på den här låten"
 
 #. Translators: {first} is an artist name.
-#: src/ui/radio.rs:224
+#: src/ui/radio.rs:208
 #, rust-format
 msgid "With {first}"
 msgstr "Med {first}"
 
 #. Translators: {first} and {second} are artist names.
-#: src/ui/radio.rs:227
+#: src/ui/radio.rs:211
 #, rust-format
 msgid "With {first} and {second}"
 msgstr "Med {first} och {second}"
 
 #. Translators: {first}, {second} and {third} are artist names.
-#: src/ui/radio.rs:233
+#: src/ui/radio.rs:217
 #, rust-format
 msgid "With {first}, {second} and {third}"
 msgstr "Med {first}, {second} och {third}"
 
 #. Translators: {first}, {second} and {third} are artist names; more follow.
-#: src/ui/radio.rs:240
+#: src/ui/radio.rs:224
 #, rust-format
 msgid "With {first}, {second}, {third} and more"
 msgstr "Med {first}, {second}, {third} med flera"
@@ -3200,3 +3194,8 @@ msgstr "Förbereder offlineuppspelning…"
 #: src/ui/collection.rs src/theme.rs
 msgid "Available offline"
 msgstr "Tillgänglig offline"
+
+#~ msgid "Radio comes from playback on this computer. Turn it on in Settings."
+#~ msgstr ""
+#~ "Radio kommer från uppspelning på den här datorn. Aktivera den i "
+#~ "Inställningar."

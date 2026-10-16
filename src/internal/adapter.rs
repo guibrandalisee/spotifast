@@ -6,6 +6,45 @@ use serde_json::{Value, json};
 
 const QUEUE_READ_CONCURRENCY: usize = 3;
 
+/// Keep the resolver's order, with a song seed first and no duplicates.
+fn radio_uris(context: &Value, seed: &str) -> Result<Vec<String>> {
+    use base64::Engine as _;
+    use librespot_core::{SpotifyUri, spotify_id::SpotifyId};
+
+    let pages = context["pages"].as_array().ok_or_else(protocol_error)?;
+    let mut seen = std::collections::HashSet::new();
+    let seed = SpotifyUri::from_uri(seed)
+        .ok()
+        .filter(|uri| matches!(uri, SpotifyUri::Track { .. }));
+    let songs = pages
+        .iter()
+        .flat_map(|page| items(&page["tracks"]))
+        .filter_map(|track| {
+            let uri = text(&track["uri"]);
+            if !uri.is_empty() {
+                SpotifyUri::from_uri(uri).ok()
+            } else {
+                let gid = base64::engine::general_purpose::STANDARD
+                    .decode(text(&track["gid"]))
+                    .ok()?;
+                SpotifyId::from_raw(&gid)
+                    .ok()
+                    .map(|id| SpotifyUri::Track { id })
+            }
+        })
+        .filter(|uri| matches!(uri, SpotifyUri::Track { .. }));
+    let uris: Vec<_> = seed
+        .into_iter()
+        .chain(songs)
+        .filter_map(|uri| uri.to_uri().ok())
+        .filter(|uri| seen.insert(uri.clone()))
+        .collect();
+    if uris.is_empty() {
+        return Err(protocol_error());
+    }
+    Ok(uris)
+}
+
 fn queue_metadata_uris(state: &Value) -> Vec<&str> {
     let mut seen = std::collections::HashSet::new();
     std::iter::once(text(at(state, "/track/uri")))
@@ -236,6 +275,23 @@ fn page_rows(rows: Vec<Value>, total: u64, offset: u32, limit: u32) -> Value {
 }
 
 impl Client {
+    /// Resolve a radio through the account transport, independently of the
+    /// audio engine, which can be stopped while downloaded music plays.
+    pub async fn radio(&self, seed: &str) -> Result<Vec<crate::api::models::Track>> {
+        let station = crate::util::station_uri(seed).ok_or_else(protocol_error)?;
+        let context = self
+            .json(Method::GET, &format!("/context-resolve/v1/{station}"), None)
+            .await?;
+        let uris = radio_uris(&context, seed)?;
+        let refs: Vec<_> = uris.iter().map(String::as_str).collect();
+        let tracks = ordered_reads(&refs, |uri| self.playable(uri)).await?;
+        tracks
+            .into_iter()
+            .filter(|track| text(&track["uri"]).starts_with("spotify:track:"))
+            .map(|track| serde_json::from_value(track).map_err(|_| protocol_error()))
+            .collect()
+    }
+
     pub async fn api_shape(
         &self,
         method: Method,
@@ -1038,6 +1094,33 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_radio_keeps_the_seed_first_and_deduplicates_all_pages() {
+        use base64::Engine as _;
+        let seed = "spotify:track:4uLU6hMCjMI75M1A2tKUQC";
+        let other = "spotify:track:6rqhFgbbKwnb9MLmUQDhG6";
+        let gid =
+            librespot_core::spotify_id::SpotifyId::from_base62("6rqhFgbbKwnb9MLmUQDhG6").unwrap();
+        let context = json!({"pages":[{"tracks":[
+            {"gid":base64::engine::general_purpose::STANDARD.encode(gid.to_raw())},
+            {"uri":seed}, {"uri":"spotify:episode:4uLU6hMCjMI75M1A2tKUQC"}
+        ]},{"tracks":[{"uri":other},{"uri":"invalid"}]}]});
+        assert_eq!(radio_uris(&context, seed).unwrap(), [seed, other]);
+        assert_eq!(radio_uris(&json!({"pages":[]}), seed).unwrap(), [seed]);
+        assert_eq!(
+            radio_uris(&context, "spotify:artist:4uLU6hMCjMI75M1A2tKUQC").unwrap(),
+            [other, seed]
+        );
+    }
+
+    #[test]
+    fn native_radio_rejects_unsupported_or_empty_non_song_contexts() {
+        let seed = "spotify:artist:4uLU6hMCjMI75M1A2tKUQC";
+        for context in [Value::Null, json!({}), json!({"pages":[]})] {
+            assert!(radio_uris(&context, seed).is_err());
+        }
+    }
 
     #[tokio::test]
     async fn queue_reads_overlap_with_a_bound_and_keep_order() {
