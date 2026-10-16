@@ -183,9 +183,17 @@ current-track pickup.
 
 Radio pages resolve Spotify's station through the verified native account
 transport, independently of the audio engine. Downloaded music keeps playing
-while an online radio loads. Track details use ordered batches of at most three
-catalogue reads under the existing global limit and cache. The complete radio
-read has a twenty-second deadline and reports a retryable error on failure.
+while an online radio loads. Track details use one extended-metadata protobuf
+batch, using librespot's protocol and the existing session metadata converters,
+under the existing global request limit and cooldown. Metadata batches share
+in-flight reads and use the bounded five-minute cache, keyed by their requested
+URI set; the station itself
+is still resolved afresh. Resolver order is restored after the batch response,
+including when Spotify relinks a track. Unavailable tracks (404 or 451) are
+omitted; missing or unreadable answers fail the read without caching a partial
+mix. These track details do not include stream counts or an explicit market
+playability flag. The complete radio read retains its twenty-second deadline
+and reports a retryable error on failure.
 
 Since 0.9.0, opening a playlist, album, artist, or podcast keeps any
 title, summary, and cover Spotifast already knows while the complete page is

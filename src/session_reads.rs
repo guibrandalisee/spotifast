@@ -452,7 +452,7 @@ async fn metadata(
 /// One request for the details of every track and episode among `uris`,
 /// with the URIs it asks for. A playlist can hold the same song twice; it
 /// is asked for once.
-fn batch<'a>(
+pub(crate) fn batch<'a>(
     uris: impl Iterator<Item = &'a SpotifyUri>,
 ) -> (BatchedEntityRequest, BTreeSet<String>) {
     let mut request = BatchedEntityRequest::new();
@@ -488,7 +488,7 @@ fn batch<'a>(
 /// read as a song, or a URI left unanswered is a retry, since a page cached
 /// without those songs would stay wrong. Kinds the request never asked for
 /// are passed over.
-fn answers(
+pub(crate) fn answers(
     asked: &BTreeSet<String>,
     response: BatchedExtensionResponse,
 ) -> Result<HashMap<String, PlayableItem>, Failure> {

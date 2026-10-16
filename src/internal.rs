@@ -360,6 +360,41 @@ impl Client {
             .ok_or(ApiError::NotSignedIn)
     }
 
+    /// The same read-only protobuf batch used by librespot, without requiring
+    /// an audio session. Keep the account transport's limiter and cooldown.
+    async fn extended_metadata(
+        &self,
+        request: librespot_protocol::extended_metadata::BatchedEntityRequest,
+    ) -> Result<librespot_protocol::extended_metadata::BatchedExtensionResponse> {
+        let body = request.write_to_bytes().map_err(|_| protocol_error())?;
+        let (base_url, access, client) = {
+            let mut state = self.authorization.lock().await;
+            if state.expires <= Instant::now() {
+                self.authenticate(&mut state).await?;
+            }
+            (
+                state.base_url.clone(),
+                state.access_token.clone(),
+                state.client_token.clone(),
+            )
+        };
+        let bytes = self
+            .response(
+                Method::POST,
+                &format!("{base_url}/extended-metadata/v0/extended-metadata"),
+                Some(body),
+                &[
+                    ("Authorization", &format!("Bearer {access}")),
+                    ("client-token", &client),
+                    ("Accept", "application/x-protobuf"),
+                    ("Content-Type", "application/x-protobuf"),
+                ],
+            )
+            .await?;
+        librespot_protocol::extended_metadata::BatchedExtensionResponse::parse_from_bytes(&bytes)
+            .map_err(|_| protocol_error())
+    }
+
     pub fn set_device_id(&self, device_id: &str) {
         *self.origin.write().unwrap_or_else(|p| p.into_inner()) = device_id.to_owned();
     }

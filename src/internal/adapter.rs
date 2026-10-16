@@ -45,6 +45,15 @@ fn radio_uris(context: &Value, seed: &str) -> Result<Vec<String>> {
     Ok(uris)
 }
 
+/// Responses can arrive in a different order and can omit unavailable songs.
+/// Keep the resolver's requested URI as the key, including for relinked tracks.
+fn radio_tracks(
+    uris: &[String],
+    mut metadata: std::collections::HashMap<String, crate::api::models::Track>,
+) -> Vec<crate::api::models::Track> {
+    uris.iter().filter_map(|uri| metadata.remove(uri)).collect()
+}
+
 fn queue_metadata_uris(state: &Value) -> Vec<&str> {
     let mut seen = std::collections::HashSet::new();
     std::iter::once(text(at(state, "/track/uri")))
@@ -278,18 +287,49 @@ impl Client {
     /// Resolve a radio through the account transport, independently of the
     /// audio engine, which can be stopped while downloaded music plays.
     pub async fn radio(&self, seed: &str) -> Result<Vec<crate::api::models::Track>> {
+        let started = std::time::Instant::now();
         let station = crate::util::station_uri(seed).ok_or_else(protocol_error)?;
         let context = self
             .json(Method::GET, &format!("/context-resolve/v1/{station}"), None)
             .await?;
+        let resolved = started.elapsed();
         let uris = radio_uris(&context, seed)?;
-        let refs: Vec<_> = uris.iter().map(String::as_str).collect();
-        let tracks = ordered_reads(&refs, |uri| self.playable(uri)).await?;
-        tracks
-            .into_iter()
-            .filter(|track| text(&track["uri"]).starts_with("spotify:track:"))
-            .map(|track| serde_json::from_value(track).map_err(|_| protocol_error()))
-            .collect()
+        let parsed: Vec<_> = uris
+            .iter()
+            .map(|uri| librespot_core::SpotifyUri::from_uri(uri).map_err(|_| protocol_error()))
+            .collect::<Result<_>>()?;
+        let (request, asked) = crate::session_reads::batch(parsed.iter());
+        let key = format!("radioMetadata:{}", json!(asked));
+        let value = self
+            .shared_reads
+            .read(&self.cache, key, || {
+                Box::pin(async {
+                    let response = self.extended_metadata(request).await?;
+                    let metadata = crate::session_reads::answers(&asked, response)
+                        .map_err(|_| protocol_error())?;
+                    let tracks: std::collections::HashMap<_, _> = metadata
+                        .into_iter()
+                        .filter_map(|(uri, item)| match item {
+                            crate::api::models::PlayableItem::Track(track) => Some((uri, track)),
+                            _ => None,
+                        })
+                        .collect();
+                    serde_json::to_value(tracks).map_err(|_| protocol_error())
+                })
+            })
+            .await?;
+        let tracks = radio_tracks(
+            &uris,
+            serde_json::from_value(value).map_err(|_| protocol_error())?,
+        );
+        log::info!(
+            "radio loaded: tracks={} resolve_ms={} metadata_ms={} total_ms={}",
+            tracks.len(),
+            resolved.as_millis(),
+            started.elapsed().saturating_sub(resolved).as_millis(),
+            started.elapsed().as_millis()
+        );
+        Ok(tracks)
     }
 
     pub async fn api_shape(
@@ -1120,6 +1160,82 @@ mod tests {
         for context in [Value::Null, json!({}), json!({"pages":[]})] {
             assert!(radio_uris(&context, seed).is_err());
         }
+    }
+
+    #[test]
+    fn batched_radio_keeps_resolver_order_with_relinking_and_unavailable_tracks() {
+        use crate::api::models::Track;
+        use librespot_protocol::entity_extension_data::EntityExtensionData;
+        use librespot_protocol::extended_metadata::{
+            BatchedExtensionResponse, EntityExtensionDataArray,
+        };
+        use librespot_protocol::extension_kind::ExtensionKind;
+        use protobuf::{EnumOrUnknown, Message as _, MessageField};
+        let seed = "spotify:track:4uLU6hMCjMI75M1A2tKUQC";
+        let gone = "spotify:track:6rqhFgbbKwnb9MLmUQDhG6";
+        let other = "spotify:track:3n3Ppam7vgaVa1iaRUc9Lp";
+        let uris = radio_uris(
+            &json!({"pages":[{"tracks":[
+                {"uri":other}, {"uri":gone}, {"uri":seed}
+            ]}]}),
+            seed,
+        )
+        .unwrap();
+        let parsed: Vec<_> = uris
+            .iter()
+            .map(|uri| librespot_core::SpotifyUri::from_uri(uri).unwrap())
+            .collect();
+        let (request, asked) = crate::session_reads::batch(parsed.iter());
+        assert_eq!(request.entity_request.len(), 3);
+        let mut array = EntityExtensionDataArray {
+            extension_kind: EnumOrUnknown::new(ExtensionKind::TRACK_V4),
+            ..Default::default()
+        };
+        // Deliberately answer out of order, with a different playable ID than
+        // the requested URI. Cache keys and row ordering must use the request.
+        for (uri, name, status) in [(gone, "", 451), (other, "Other", 200), (seed, "Seed", 200)] {
+            let mut track = librespot_protocol::metadata::Track::new();
+            track.set_gid(vec![0x02; 16]);
+            track.set_name(name.into());
+            track.album.mut_or_insert_default().set_gid(vec![0x03; 16]);
+            let mut data = EntityExtensionData {
+                entity_uri: uri.into(),
+                ..Default::default()
+            };
+            data.header.mut_or_insert_default().status_code = status;
+            if status == 200 {
+                data.extension_data = MessageField::some(protobuf::well_known_types::any::Any {
+                    value: track.write_to_bytes().unwrap(),
+                    ..Default::default()
+                });
+            }
+            array.extension_data.push(data);
+        }
+        let response = BatchedExtensionResponse {
+            extended_metadata: vec![array],
+            ..Default::default()
+        };
+        let tracks: std::collections::HashMap<_, _> =
+            crate::session_reads::answers(&asked, response)
+                .unwrap()
+                .into_iter()
+                .map(|(uri, item)| match item {
+                    crate::api::models::PlayableItem::Track(track) => (uri, track),
+                    _ => panic!("radio requested only tracks"),
+                })
+                .collect();
+        // The bounded cache holds serialized metadata, never the station mix.
+        let cached: std::collections::HashMap<String, Track> =
+            serde_json::from_value(json!(tracks)).unwrap();
+        let tracks = radio_tracks(&uris, cached);
+        assert_eq!(
+            tracks
+                .iter()
+                .map(|track| track.name.as_str())
+                .collect::<Vec<_>>(),
+            ["Seed", "Other"]
+        );
+        assert_ne!(tracks[0].uri, seed);
     }
 
     #[tokio::test]

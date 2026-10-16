@@ -163,6 +163,7 @@ https://github.com/user-attachments/assets/a5f669ce-b3b7-4f8e-9933-976a78876c7e
 **Go to song radio** opens a mix with the selected song first, followed by
 Spotify's recommendations. Refresh keeps that song first without duplicating it.
 Radios load online even while downloaded music plays, without interrupting it.
+Track details load in one batch instead of a separate request for each song.
 
 | Feature | What you can do |
 |---|---|
