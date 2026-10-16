@@ -82,6 +82,12 @@ queued-audio times in milliseconds; these are not acoustic latency measurements.
 Selecting a new song cancels pending reconnect recovery before that song is
 ready, so a recovery timer cannot restart the previous song during loading.
 
+Local Play/Pause commands specify the state shown by the clicked button, so a
+delayed engine state cannot turn Play into Pause. Loading retains the requested
+state until playback settles. The log records local load and transport requests,
+loading and playback transitions, and switches to downloaded audio without
+credentials or authorization responses.
+
 Connect can retain its previous song after the active device disconnects. Native
 playback reads return no current session unless the active device is still
 registered. A song without a usable device ID cannot override the ready local

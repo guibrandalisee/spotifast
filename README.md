@@ -27,6 +27,9 @@ Spotifast is a Spotify client written in Rust with
 **Playback needs Spotify Premium.** Free accounts can browse and search, but
 cannot play music through Spotifast.
 
+Local Play/Pause controls keep the requested state while a song loads and send
+explicit play or pause commands, including for downloaded audio.
+
 ### Personal fork: native Spotify requests
 
 This fork replaces Spotify Web API traffic with a custom native-service client.

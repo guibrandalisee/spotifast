@@ -2630,7 +2630,11 @@ impl App {
             self.session_dirty = true;
         }
         if state.playback != self.local.playback {
-            self.optimistic_playing = None;
+            // Loading confirms receipt of the request, not its transport state.
+            // Keep the chosen Play/Pause state until playback settles.
+            if !state.loading && state.playback != Playback::Loading {
+                self.optimistic_playing = None;
+            }
             if matches!(state.playback, Playback::Playing | Playback::Loading) {
                 self.clear_play_pending();
             }
@@ -7922,7 +7926,8 @@ impl App {
         match self.target() {
             Target::Local => {
                 if self.local.is_active() {
-                    self.backend.player(PlayerCommand::Toggle);
+                    self.backend
+                        .player(PlayerCommand::SetPlaying(playing != Some(true)));
                 } else if let Some(remote) = self.remote_fresh() {
                     // Nothing is playing locally: resume on this computer.
                     let uri = remote
@@ -11499,6 +11504,53 @@ mod tests {
     }
 
     #[test]
+    fn local_play_loading_keeps_the_requested_transport_state() {
+        let mut app = headless_app();
+        app.local_ready = true;
+        app.local.connected = true;
+        app.local.track = Some(crate::player::LocalTrack {
+            uri: "spotify:track:selected".into(),
+            duration_ms: 30_000,
+            ..Default::default()
+        });
+        app.play_request(
+            PlayRequest::tracks(vec!["spotify:track:selected".into()]),
+            false,
+        );
+        app.backend.take_player_commands();
+        app.handle_local(LocalState {
+            playback: Playback::Loading,
+            loading: true,
+            ..app.local.clone()
+        });
+        assert!(app.believed_playing(), "loading must not undo Play");
+        assert!(app.now_playing().unwrap().playing);
+        app.backend.shutdown();
+    }
+
+    #[test]
+    fn local_transport_commands_follow_the_shown_button() {
+        for (actual, shown) in [(Playback::Playing, false), (Playback::Paused, true)] {
+            let mut app = headless_app();
+            app.local_ready = true;
+            app.local.connected = true;
+            app.local.playback = actual;
+            app.local.track = Some(crate::player::LocalTrack {
+                uri: "spotify:track:selected".into(),
+                duration_ms: 30_000,
+                ..Default::default()
+            });
+            app.optimistic_playing = Some((shown, Instant::now()));
+            app.toggle_play();
+            assert_eq!(
+                app.backend.take_player_commands(),
+                vec![PlayerCommand::SetPlaying(!shown)]
+            );
+            app.backend.shutdown();
+        }
+    }
+
+    #[test]
     fn offline_controls_work_while_the_account_is_reconnecting() {
         let mut app = headless_app();
         app.backend.set_offline(true);
@@ -11534,7 +11586,7 @@ mod tests {
                 .iter()
                 .any(|command| matches!(command, PlayerCommand::Volume(_)))
         );
-        assert!(commands.contains(&PlayerCommand::Toggle));
+        assert!(commands.contains(&PlayerCommand::SetPlaying(false)));
         app.refresh_queue(true);
         assert!(
             app.queue_fetched_at.is_some(),

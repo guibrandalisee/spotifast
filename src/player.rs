@@ -301,7 +301,8 @@ impl LoadSpec {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum PlayerCommand {
-    Toggle,
+    /// Apply the transport state requested by the displayed Play/Pause button.
+    SetPlaying(bool),
     Next,
     Previous,
     /// Remove manually queued tracks and keep context tracks.
@@ -580,6 +581,7 @@ impl Engine {
     }
 
     pub fn shutdown(&self) {
+        log::info!("stopping local streaming engine");
         self.shutting_down
             .store(true, std::sync::atomic::Ordering::SeqCst);
         let _ = self.spirc.shutdown();
@@ -623,6 +625,19 @@ impl Engine {
     }
 
     pub fn command(&self, command: PlayerCommand) -> Result<()> {
+        match &command {
+            PlayerCommand::Load(spec) => log::info!(
+                "local playback load: context={}, tracks={}, play={}, position_ms={}",
+                spec.context_uri.is_some(),
+                spec.uris.len(),
+                spec.play,
+                spec.position_ms
+            ),
+            PlayerCommand::SetPlaying(playing) => {
+                log::info!("local playback requested: play={playing}")
+            }
+            _ => {}
+        }
         if let PlayerCommand::Load(spec) = &command {
             self.audio.begin_load();
             if let Some(uri) = spec.preload_uri() {
@@ -648,7 +663,8 @@ impl Engine {
     fn send_command(&self, command: PlayerCommand) -> Result<()> {
         let spirc = &self.spirc;
         match command {
-            PlayerCommand::Toggle => spirc.play_pause()?,
+            PlayerCommand::SetPlaying(true) => spirc.play()?,
+            PlayerCommand::SetPlaying(false) => spirc.pause()?,
             PlayerCommand::Next => spirc.next()?,
             PlayerCommand::Previous => spirc.prev()?,
             PlayerCommand::ClearQueue => spirc.clear_queue()?,
@@ -856,7 +872,17 @@ async fn run_events(
         audio.handle_player_event(&event);
         let snapshot = {
             let mut current = state.lock().unwrap_or_else(|p| p.into_inner());
+            let before = (current.playback, current.loading);
             if apply_event(&mut current, event) {
+                if before != (current.playback, current.loading) {
+                    log::info!(
+                        "local playback state: {:?} -> {:?}, loading={}, position_ms={}",
+                        before.0,
+                        current.playback,
+                        current.loading,
+                        current.position_ms
+                    );
+                }
                 Some(current.clone())
             } else {
                 None

@@ -1774,6 +1774,7 @@ impl Worker {
                         .map_err(|error| error.to_string())
                     }) {
                         Ok((playlist, player)) => {
+                            log::info!("switching local playback to downloaded audio");
                             self.offline_active
                                 .store(true, std::sync::atomic::Ordering::SeqCst);
                             if let Some(engine) = &self.engine {

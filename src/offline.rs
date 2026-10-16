@@ -1362,11 +1362,11 @@ fn run(
                         s.position_ms = 0;
                     }
                 }
-                PlayerCommand::Toggle => {
-                    s.playback = if s.playback == Playback::Playing {
-                        Playback::Paused
-                    } else {
+                PlayerCommand::SetPlaying(playing) => {
+                    s.playback = if playing {
                         Playback::Playing
+                    } else {
+                        Playback::Paused
                     };
                     s.position_at = (s.playback == Playback::Playing).then(Instant::now);
                     transport = Some(s.playback == Playback::Playing);
