@@ -62,6 +62,9 @@ const TOAST_LIFETIME: Duration = Duration::from_millis(3200);
 /// from delayed repaints, so 33 ms drives roughly one frame per 16 ms.
 const TOAST_FRAME: Duration = Duration::from_millis(33);
 const OPTIMISTIC_HOLD: Duration = Duration::from_millis(2500);
+/// How recent a play must be to count as the one handing offline playback
+/// over to the streaming engine, which reconnects before it can load.
+const OFFLINE_HANDOVER: Duration = Duration::from_secs(5);
 
 /// How long a newly started context remains visible while Spotify catches up.
 /// During local takeover, Spotify may briefly alternate between old and new
@@ -2135,7 +2138,24 @@ impl App {
                     self.local.playback = Playback::Paused;
                     self.local.position_at = None;
                     self.local_playback = LocalPlayback::Unavailable;
-                    self.clear_play_pending();
+                    // The offline player's device id names no Spotify device. Left
+                    // selected, it routes every later play to the Web API, which
+                    // answers 404 until the device list happens to be refreshed.
+                    if let Some(offline) = self
+                        .local_device_id
+                        .take_if(|id| id.starts_with("offline-"))
+                        && self.selected_device.as_deref() == Some(offline.as_str())
+                    {
+                        self.selected_device = None;
+                    }
+                    // A play that ended offline playback is now loading on the
+                    // streaming engine: keep showing it rather than a dead button.
+                    if self
+                        .pending_play_at
+                        .is_none_or(|at| at.elapsed() > OFFLINE_HANDOVER)
+                    {
+                        self.clear_play_pending();
+                    }
                 }
                 Event::PlaylistCoverChecked {
                     id,
@@ -7359,9 +7379,13 @@ impl App {
             uris.get(request.offset_position.unwrap_or(0) as usize)
                 .copied()
         })?;
-        self.downloaded_tracks
-            .iter()
-            .find_map(|(id, available)| available.contains(selected).then(|| id.clone()))
+        // The offline player plays only saved audio. A list with any other
+        // song (a radio, an album, search results) streams instead, or it
+        // would drop those songs and stop after the saved ones.
+        self.downloaded_tracks.iter().find_map(|(id, available)| {
+            (available.contains(selected) && uris.iter().all(|uri| available.contains(*uri)))
+                .then(|| id.clone())
+        })
     }
 
     fn play_request(&mut self, request: PlayRequest, shuffle_first: bool) {
@@ -7906,6 +7930,14 @@ impl App {
         let Some(track) = self.resume_track.clone() else {
             return false;
         };
+        if let Some(station) = self
+            .resume_context
+            .clone()
+            .filter(|context| context.starts_with("spotify:station:"))
+        {
+            self.resume_station(&station, track, self.resume_position_ms);
+            return true;
+        }
         let mut request = match self.resume_context.clone() {
             Some(context) => PlayRequest::context(context)
                 .starting_at_uri(self.resume_context_track.clone().unwrap_or(track)),
@@ -7916,6 +7948,28 @@ impl App {
         true
     }
 
+    /// Resumes `track` from a radio. Spotify mixes a station afresh each time
+    /// it is resolved, so the song is rarely in the new mix and loading the
+    /// station would start another one. Play the song itself, then the songs
+    /// the radio page holds, with the station kept as their source.
+    fn resume_station(&mut self, station: &str, track: String, position_ms: u32) {
+        let mut uris = vec![track.clone()];
+        if let Some(songs) = util::station_seed(station)
+            .and_then(|seed| self.radio_pages.get(&seed))
+            .and_then(|page| page.songs.get())
+        {
+            uris.extend(
+                songs
+                    .iter()
+                    .map(|song| song.uri.clone())
+                    .filter(|uri| *uri != track),
+            );
+        }
+        let mut request = PlayRequest::tracks(uris).starting_at_index(0);
+        request.position_ms = position_ms;
+        self.play_request_from_context(request, false, Some(station));
+    }
+
     fn toggle_play(&mut self) {
         let playing = self.now_playing().map(|now| now.playing);
         log::info!(
@@ -7924,6 +7978,29 @@ impl App {
             self.local.is_active()
         );
         if !self.offline_playing
+            && self.any_play_pending()
+            && matches!(
+                self.local_playback,
+                LocalPlayback::Connecting | LocalPlayback::Authorizing
+            )
+            && !matches!(self.target(), Target::Remote(Some(_)))
+        {
+            // The last play is waiting for the engine to reconnect and will
+            // start on it. Spotify knows no device to send this one to yet.
+            log::info!("Play/Pause held: the local player is still starting the last play");
+            return;
+        }
+        // A connected streaming engine holding the paused song resumes it in
+        // place; only a song it does not hold is reloaded from saved audio.
+        let engine_holds_song = self.local_ready
+            && self.local.connected
+            && self.local.is_active()
+            && self
+                .local_device_id
+                .as_deref()
+                .is_some_and(|id| !id.starts_with("offline-"));
+        if !self.offline_playing
+            && !engine_holds_song
             && playing != Some(true)
             && !matches!(self.target(), Target::Remote(Some(_)))
             && let Some(now) = self
@@ -7961,6 +8038,16 @@ impl App {
                         .map(|item| item.uri().to_string());
                     let position = remote.state.progress_ms.unwrap_or(0);
                     if let Some(uri) = uri {
+                        if let Some(station) = remote
+                            .state
+                            .context
+                            .as_ref()
+                            .map(|context| context.uri.clone())
+                            .filter(|context| context.starts_with("spotify:station:"))
+                        {
+                            self.resume_station(&station, uri, position);
+                            return;
+                        }
                         let mut request = match &remote.state.context {
                             Some(context) if !context.uri.is_empty() => {
                                 PlayRequest::context(context.uri.clone()).starting_at_uri(uri)
@@ -13936,6 +14023,94 @@ mod tests {
         );
     }
 
+    /// Spotify mixes a station afresh on every load, so resuming the station
+    /// itself starts some other song. Play resumes the saved song, then the
+    /// radio page's songs, and keeps the radio as the source.
+    #[test]
+    fn pressing_play_on_a_cold_start_resumes_the_radio_song_not_a_new_mix() {
+        let mut app = headless_app();
+        let station = "spotify:station:track:seed";
+        app.radio_pages.insert(
+            "spotify:track:seed".into(),
+            RadioPage {
+                songs: Loadable::Loaded(
+                    [
+                        "spotify:track:fresh1",
+                        "spotify:track:saved",
+                        "spotify:track:fresh2",
+                    ]
+                    .into_iter()
+                    .map(|uri| Track {
+                        uri: uri.into(),
+                        ..Default::default()
+                    })
+                    .collect(),
+                ),
+                ..RadioPage::default()
+            },
+        );
+        app.resume_context = Some(station.into());
+        app.resume_track = Some("spotify:track:saved".into());
+        app.resume_position_ms = 4_000;
+        app.toggle_play();
+        let request = app
+            .queued_play
+            .as_ref()
+            .expect("the resumed play is held for the engine");
+        assert_eq!(
+            request.context_uri, None,
+            "the station is not resolved again"
+        );
+        assert_eq!(
+            request.uris,
+            vec![
+                "spotify:track:saved".to_string(),
+                "spotify:track:fresh1".into(),
+                "spotify:track:fresh2".into(),
+            ]
+        );
+        assert_eq!(request.offset_position, Some(0));
+        assert_eq!(request.position_ms, 4_000);
+        assert_eq!(app.resume_context.as_deref(), Some(station));
+        app.backend.shutdown();
+    }
+
+    /// Ending offline playback must not leave its made-up device selected:
+    /// Spotify knows no such device and answers every play with 404.
+    #[test]
+    fn leaving_offline_playback_forgets_its_device_and_keeps_the_handover_play() {
+        let mut app = headless_app();
+        app.handle_backend_events(vec![Event::OfflineStarted(
+            Playlist {
+                id: "mix".into(),
+                uri: "spotify:playlist:mix".into(),
+                ..Default::default()
+            },
+            Some(LoadSpec::default()),
+        )]);
+        assert_eq!(app.selected_device.as_deref(), Some("offline-mix"));
+        app.set_play_pending(vec!["spotify:station:track:seed".into()]);
+        app.handle_backend_events(vec![
+            Event::OfflineStopped,
+            Event::Playback(LocalPlayback::Connecting),
+        ]);
+        assert_eq!(app.selected_device, None);
+        assert_eq!(app.local_device_id, None);
+        assert!(
+            app.any_play_pending(),
+            "the play that moved to streaming still shows as starting"
+        );
+        app.backend.take_player_commands();
+        app.toggle_play();
+        assert!(
+            app.backend.take_player_commands().is_empty(),
+            "a second press waits for the reconnecting engine"
+        );
+        assert!(app.backend.take_remote_play_requests().is_empty());
+        assert!(app.queued_play.is_none());
+        app.backend.shutdown();
+    }
+
     /// Play on an in-progress episode continues from the place the row or
     /// card showed as time left. The playing episode stays where it plays.
     #[test]
@@ -17250,6 +17425,18 @@ mod tests {
         assert_eq!(
             app.downloaded_playlist(&PlayRequest::tracks(vec!["spotify:track:saved".into()])),
             Some("mix".into())
+        );
+        // A radio whose clicked song happens to be saved still streams: the
+        // offline player would drop every other song and stop after it.
+        assert_eq!(
+            app.downloaded_playlist(
+                &PlayRequest::tracks(vec![
+                    "spotify:track:streamed".into(),
+                    "spotify:track:saved".into(),
+                ])
+                .starting_at_index(1)
+            ),
+            None
         );
         let load = LoadSpec {
             context_uri: Some("spotify:playlist:mix".into()),
